@@ -20,6 +20,7 @@ streamlit run app_crm_cobranca_first.py
 from __future__ import annotations
 
 import sqlite3
+import shutil
 import zipfile
 import xml.etree.ElementTree as ET
 from io import BytesIO
@@ -33,8 +34,11 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM Financeiro de Cobrança"
-APP_VERSION = "v1.5 - CRM por cliente"
-DB_PATH = Path("crm_cobranca_first.db")
+APP_VERSION = "v1.6 - CRM financeiro seguro"
+DATA_DIR = Path("dados")
+BACKUP_DIR = DATA_DIR / "backup"
+DB_PATH = DATA_DIR / "crm_cobranca_first.db"
+LEGACY_DB_PATH = Path("crm_cobranca_first.db")
 
 REQUIRED_COLUMNS = [
     "Filial", "Prefixo", "No. Titulo", "Parcela", "Tipo", "Cliente", "Loja",
@@ -114,9 +118,73 @@ st.markdown(
 
 
 # -----------------------------------------------------------------------------
+# Armazenamento e backups
+# -----------------------------------------------------------------------------
+def ensure_storage() -> None:
+    DATA_DIR.mkdir(exist_ok=True)
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    # Migração automática do banco antigo, caso exista na raiz do app.
+    if LEGACY_DB_PATH.exists() and not DB_PATH.exists():
+        shutil.copy2(LEGACY_DB_PATH, DB_PATH)
+
+
+def backup_db(motivo: str = "manual") -> Optional[Path]:
+    ensure_storage()
+    if not DB_PATH.exists():
+        return None
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_motivo = "".join(ch if ch.isalnum() else "_" for ch in str(motivo))[:30] or "backup"
+    destino = BACKUP_DIR / f"crm_cobranca_{safe_motivo}_{stamp}.db"
+    shutil.copy2(DB_PATH, destino)
+    return destino
+
+
+def export_backup_zip() -> bytes:
+    ensure_storage()
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as z:
+        if DB_PATH.exists():
+            z.write(DB_PATH, arcname="dados/crm_cobranca_first.db")
+        for bkp in sorted(BACKUP_DIR.glob("*.db"))[-10:]:
+            z.write(bkp, arcname=f"dados/backup/{bkp.name}")
+        # manifesto simples para conferência
+        manifesto = f"Exportado em {datetime.now().isoformat(timespec='seconds')}\nBanco: {DB_PATH}\n"
+        z.writestr("manifesto.txt", manifesto)
+    return output.getvalue()
+
+
+def db_health() -> Dict[str, object]:
+    ensure_storage()
+    if not DB_PATH.exists():
+        return {"ok": False, "clientes": 0, "titulos": 0, "historico": 0, "ultimo_backup": ""}
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    try:
+        cur.execute("PRAGMA integrity_check")
+        ok = cur.fetchone()[0] == "ok"
+        def count_table(name):
+            try:
+                cur.execute(f"SELECT COUNT(*) FROM {name}")
+                return cur.fetchone()[0]
+            except Exception:
+                return 0
+        backups = sorted(BACKUP_DIR.glob("*.db"))
+        return {
+            "ok": ok,
+            "clientes": count_table("clientes"),
+            "titulos": count_table("titulos"),
+            "historico": count_table("historico_acoes"),
+            "ultimo_backup": backups[-1].name if backups else "",
+        }
+    finally:
+        conn.close()
+
+
+# -----------------------------------------------------------------------------
 # Banco de dados
 # -----------------------------------------------------------------------------
 def get_conn() -> sqlite3.Connection:
+    ensure_storage()
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
@@ -459,6 +527,7 @@ def get_action_for_day(ciclo: int, status: str, promessa: Optional[str], ref: da
 
 
 def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple[int, int, int, float]:
+    backup_db("antes_upload")
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -681,6 +750,7 @@ def safe_to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
 
 
 def update_cliente_fields(cliente_codigo: str, loja: str, nome_cliente: str, vendedor: str, gerente: str, observacao: str) -> int:
+    backup_db("antes_responsaveis")
     conn = get_conn()
     try:
         where, params = _cliente_where_clause(cliente_codigo, loja, nome_cliente)
@@ -731,6 +801,7 @@ def add_action(titulo_id: str, data_acao: date, tipo: str, responsavel: str, obs
 
 
 def add_action_cliente(cliente_codigo: str, loja: str, nome_cliente: str, data_acao: date, tipo: str, responsavel: str, observacao: str, promessa: Optional[date]) -> int:
+    backup_db("antes_acao_cliente")
     """Registra uma única ação do CRM em todos os títulos abertos do cliente.
 
     A cobrança é feita uma vez por cliente, mesmo quando existem vários títulos.
@@ -928,7 +999,7 @@ with st.sidebar:
     st.markdown("### Navegação")
     page = st.radio(
         "Selecione",
-        ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Carteira", "Histórico", "Régua", "Base de títulos"],
+        ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Carteira", "Histórico", "Régua", "Base de títulos", "Segurança"],
         label_visibility="collapsed",
     )
     data_ref = st.date_input("Data de referência", value=date.today(), format="DD/MM/YYYY")
@@ -1226,18 +1297,12 @@ elif page == "Cliente":
             st.download_button("Baixar títulos do cliente em CSV", csv, file_name="relatorio_cliente.csv", mime="text/csv", use_container_width=True)
 
 elif page == "Carteira":
-    st.markdown("### Carteira")
-    if st.button("Atualizar cadastro a partir da base atual"):
-        total = migrate_clientes_from_titulos()
-        st.success(f"Cadastro sincronizado: {total} vínculo(s) avaliados.")
-        st.rerun()
-
+    st.markdown("### Carteira comercial")
     fila = prepare_fila_clientes(data_ref)
-    clientes = load_clientes()
     if fila.empty:
         st.warning("Não há títulos em cobrança.")
     else:
-        tab1, tab2, tab3 = st.tabs(["Gerente", "Vendedor", "Cadastro de clientes"])
+        tab1, tab2 = st.tabs(["Gerente", "Vendedor"])
         with tab1:
             df = fila.copy()
             df["gerente"] = df["gerente"].replace("", "Sem gerente")
@@ -1260,40 +1325,38 @@ elif page == "Carteira":
             ).sort_values("Valor", ascending=False)
             v_show = v.copy(); v_show["Valor"] = v_show["Valor"].apply(br_money)
             st.dataframe(v_show.rename(columns={"vendedor":"Vendedor", "Maior_atraso":"Maior atraso"}), use_container_width=True, hide_index=True)
-        with tab3:
-            if clientes.empty:
-                st.warning("Cadastro vazio. Salve vendedor/gerente na tela Cliente ou sincronize a base atual.")
+
+
+elif page == "Segurança":
+    st.markdown("### Segurança dos dados")
+    health = db_health()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Banco", "OK" if health.get("ok") else "Não iniciado")
+    c2.metric("Títulos", int(health.get("titulos", 0)))
+    c3.metric("Histórico", int(health.get("historico", 0)))
+    c4.metric("Último backup", health.get("ultimo_backup") or "Sem backup")
+
+    st.markdown("#### Backup")
+    b1, b2 = st.columns(2)
+    with b1:
+        if st.button("Gerar backup agora", type="primary", use_container_width=True):
+            destino = backup_db("manual")
+            if destino:
+                st.success(f"Backup gerado: {destino.name}")
             else:
-                edited = st.data_editor(
-                    clientes[["cliente_codigo", "loja", "nome_cliente", "vendedor", "gerente", "observacao"]].rename(columns={
-                        "cliente_codigo":"Cód. Cliente", "loja":"Loja", "nome_cliente":"Cliente", "vendedor":"Vendedor", "gerente":"Gerente", "observacao":"Observação"
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
-                    num_rows="fixed",
-                )
-                if st.button("Salvar cadastro de clientes", type="primary"):
-                    conn = get_conn()
-                    try:
-                        for _, r in edited.iterrows():
-                            upsert_cliente_cadastro(
-                                conn,
-                                str(r.get("Cód. Cliente", "")), str(r.get("Loja", "")), str(r.get("Cliente", "")),
-                                str(r.get("Vendedor", "") or ""), str(r.get("Gerente", "") or ""), str(r.get("Observação", "") or ""),
-                            )
-                            where, params = _cliente_where_clause(str(r.get("Cód. Cliente", "")), str(r.get("Loja", "")), str(r.get("Cliente", "")))
-                            conn.execute(
-                                f"UPDATE titulos SET vendedor = ?, gerente = ?, observacao_atual = ?, updated_at = ? WHERE {where} AND status != ?",
-                                [str(r.get("Vendedor", "") or "").strip(), str(r.get("Gerente", "") or "").strip(), str(r.get("Observação", "") or "").strip(), datetime.now().isoformat(timespec="seconds")] + params + [STATUS_PAGO]
-                            )
-                        conn.commit()
-                        st.success("Cadastro salvo.")
-                        st.rerun()
-                    except Exception as exc:
-                        conn.rollback()
-                        st.error(f"Não consegui salvar o cadastro: {exc}")
-                    finally:
-                        conn.close()
+                st.warning("Ainda não existe banco para gerar backup.")
+    with b2:
+        try:
+            pacote = export_backup_zip()
+            st.download_button(
+                "Baixar pacote completo",
+                pacote,
+                file_name=f"crm_financeiro_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                mime="application/zip",
+                use_container_width=True,
+            )
+        except Exception as exc:
+            st.error(f"Não consegui gerar o pacote: {exc}")
 
 
 elif page == "Histórico":
