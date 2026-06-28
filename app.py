@@ -20,6 +20,7 @@ streamlit run app_crm_cobranca_first.py
 from __future__ import annotations
 
 import sqlite3
+import html
 import shutil
 import zipfile
 import xml.etree.ElementTree as ET
@@ -34,7 +35,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM Financeiro de Cobrança"
-APP_VERSION = "v1.6 - CRM financeiro seguro"
+APP_VERSION = "v1.7 - cards corrigidos"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -99,12 +100,18 @@ st.markdown(
         .first-header h1 {margin: 0; font-size: 30px; font-weight: 800;}
         .first-header p {margin: 6px 0 0 0; opacity: .92;}
         .metric-card {
-            background: white; border-radius: 18px; padding: 18px 20px; border: 1px solid #e7edf5;
-            box-shadow: 0 6px 20px rgba(15,39,66,0.06); min-height: 112px;
+            background: white; border-radius: 18px; padding: 16px 18px; border: 1px solid #e7edf5;
+            box-shadow: 0 6px 20px rgba(15,39,66,0.06); min-height: 104px;
+            width: 100%; overflow: visible; box-sizing: border-box;
         }
-        .metric-label {font-size: 13px; color: #667085; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;}
-        .metric-value {font-size: 26px; color: #101828; font-weight: 850; margin-top: 8px;}
-        .metric-help {font-size: 12px; color: #98a2b3; margin-top: 5px;}
+        .metric-label {font-size: 12px; color: #667085; font-weight: 750; text-transform: uppercase; letter-spacing: .035em; line-height: 1.25;}
+        .metric-value {font-size: clamp(20px, 2.1vw, 30px); color: #101828; font-weight: 850; margin-top: 8px; line-height: 1.15; white-space: normal; overflow-wrap: anywhere; word-break: normal;}
+        .metric-value.long-text {font-size: clamp(18px, 1.7vw, 26px);}
+        .metric-help {font-size: 12px; color: #98a2b3; margin-top: 5px; line-height: 1.25; white-space: normal; overflow-wrap: anywhere;}
+        div[data-testid="stMetric"] {background: white; border-radius: 18px; padding: 14px 16px; border: 1px solid #e7edf5; box-shadow: 0 6px 20px rgba(15,39,66,0.06); min-height: 100px; overflow: visible;}
+        div[data-testid="stMetric"] label {white-space: normal !important; overflow-wrap: anywhere !important;}
+        div[data-testid="stMetricValue"] {font-size: clamp(18px, 2vw, 28px) !important; white-space: normal !important; overflow: visible !important; text-overflow: unset !important; line-height: 1.15 !important;}
+        div[data-testid="stMetricValue"] > div {white-space: normal !important; overflow: visible !important; text-overflow: unset !important;}
         .section-card {
             background: white; border-radius: 18px; padding: 18px; border: 1px solid #e7edf5;
             box-shadow: 0 6px 20px rgba(15,39,66,0.06); margin-bottom: 16px;
@@ -967,13 +974,14 @@ def load_titulos_cliente(cliente_codigo: str, loja: str, nome_cliente: str, some
     return df
 
 
-def metric_card(label: str, value: str, help_text: str = "") -> None:
+def metric_card(label: str, value: str, help_text: str = "", long_text: bool = False) -> None:
+    value_class = "metric-value long-text" if long_text else "metric-value"
     st.markdown(
         f"""
         <div class="metric-card">
-            <div class="metric-label">{label}</div>
-            <div class="metric-value">{value}</div>
-            <div class="metric-help">{help_text}</div>
+            <div class="metric-label">{html.escape(str(label))}</div>
+            <div class="{value_class}">{html.escape(str(value))}</div>
+            <div class="metric-help">{html.escape(str(help_text))}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1183,12 +1191,19 @@ elif page == "Cliente":
         nome_cliente = str(selected["nome_cliente"])
         titulos_cliente = load_titulos_cliente(cliente_codigo, loja, nome_cliente, somente_abertos=True)
 
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Cliente", nome_cliente)
-        c2.metric("Saldo total", br_money(selected["saldo_total"]))
-        c3.metric("Títulos", int(selected["qtd_titulos"]))
-        c4.metric("Maior atraso", int(selected["maior_dias_atraso"]))
-        c5.metric("Ação única", selected["acao_do_dia"])
+        c_cliente, c_saldo = st.columns([2.4, 1.1])
+        with c_cliente:
+            metric_card("Cliente", nome_cliente, "Ação consolidada por cliente", long_text=True)
+        with c_saldo:
+            metric_card("Saldo total", br_money(selected["saldo_total"]), "Títulos abertos")
+
+        c_tit, c_atraso, c_acao = st.columns([1, 1, 2])
+        with c_tit:
+            metric_card("Títulos", int(selected["qtd_titulos"]), "Quantidade em aberto")
+        with c_atraso:
+            metric_card("Maior atraso", f"{int(selected['maior_dias_atraso'])} dia(s)", "Maior vencimento em aberto")
+        with c_acao:
+            metric_card("Ação única", selected["acao_do_dia"], "Próxima etapa da régua", long_text=True)
 
         st.markdown("#### Títulos abertos do cliente")
         tit_show = titulos_cliente.copy()
