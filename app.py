@@ -35,7 +35,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM Financeiro de Cobrança"
-APP_VERSION = "v1.7 - cards corrigidos"
+APP_VERSION = "v1.8 - persistência e restauração"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -159,6 +159,43 @@ def export_backup_zip() -> bytes:
         z.writestr("manifesto.txt", manifesto)
     return output.getvalue()
 
+
+
+
+def restore_backup_file(uploaded_file) -> str:
+    """Restaura o banco a partir de um pacote ZIP exportado pelo app ou de um .db direto."""
+    ensure_storage()
+    if uploaded_file is None:
+        raise ValueError("Nenhum arquivo selecionado.")
+    name = str(getattr(uploaded_file, "name", "backup"))
+    data = uploaded_file.read()
+    # Sempre preserva o banco atual antes de substituir.
+    backup_db("antes_restaurar")
+
+    if name.lower().endswith(".zip"):
+        with zipfile.ZipFile(BytesIO(data)) as z:
+            candidates = [n for n in z.namelist() if n.endswith("crm_cobranca_first.db")]
+            if not candidates:
+                raise ValueError("O ZIP não contém o arquivo crm_cobranca_first.db.")
+            db_bytes = z.read(candidates[0])
+    elif name.lower().endswith(".db"):
+        db_bytes = data
+    else:
+        raise ValueError("Envie um backup .zip gerado pelo app ou o arquivo .db do CRM.")
+
+    # Valida integridade antes de substituir definitivamente.
+    tmp = DATA_DIR / "_restore_test.db"
+    tmp.write_bytes(db_bytes)
+    test_conn = sqlite3.connect(tmp)
+    try:
+        chk = test_conn.execute("PRAGMA integrity_check").fetchone()[0]
+        if chk != "ok":
+            raise ValueError(f"Banco inválido: {chk}")
+    finally:
+        test_conn.close()
+    shutil.copy2(tmp, DB_PATH)
+    tmp.unlink(missing_ok=True)
+    return name
 
 def db_health() -> Dict[str, object]:
     ensure_storage()
@@ -1067,6 +1104,15 @@ if page == "Upload diário":
                 b.metric("Atualizados", atualizados)
                 c.metric("Pagos identificados", pagos)
                 d.metric("Valor aberto", br_money(valor_aberto))
+                st.info("Para não perder o histórico no Streamlit Cloud, baixe o backup abaixo após atualizar o CRM.")
+                pacote = export_backup_zip()
+                st.download_button(
+                    "Baixar backup do CRM agora",
+                    pacote,
+                    file_name=f"crm_financeiro_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                    mime="application/zip",
+                    use_container_width=True,
+                )
                 st.balloons()
         except Exception as exc:
             st.error(f"Não consegui exibir a prévia/processamento: {exc}")
@@ -1351,13 +1397,25 @@ elif page == "Segurança":
     c3.metric("Histórico", int(health.get("historico", 0)))
     c4.metric("Último backup", health.get("ultimo_backup") or "Sem backup")
 
+    st.warning("No Streamlit Cloud, arquivos salvos dentro do app podem sumir após reboot/redeploy. O histórico só fica seguro se você baixar o backup ou restaurar de uma base externa.")
+
+    st.markdown("#### Restaurar backup")
+    restore_file = st.file_uploader("Restaurar pacote do CRM (.zip) ou banco (.db)", type=["zip", "db"])
+    if st.button("Restaurar backup selecionado", type="primary", use_container_width=True):
+        try:
+            restored = restore_backup_file(restore_file)
+            st.success(f"Backup restaurado com sucesso: {restored}")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Não consegui restaurar o backup: {exc}")
+
     st.markdown("#### Backup")
     b1, b2 = st.columns(2)
     with b1:
-        if st.button("Gerar backup agora", type="primary", use_container_width=True):
+        if st.button("Gerar backup local agora", use_container_width=True):
             destino = backup_db("manual")
             if destino:
-                st.success(f"Backup gerado: {destino.name}")
+                st.success(f"Backup local gerado: {destino.name}")
             else:
                 st.warning("Ainda não existe banco para gerar backup.")
     with b2:
