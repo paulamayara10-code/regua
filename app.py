@@ -1037,7 +1037,7 @@ def set_fila_filter(page_name: str = "Fila por cliente", **filters) -> None:
     """Define filtros e leva o usuário para a tela de fila/cliente."""
     for k, v in filters.items():
         st.session_state[k] = v
-    st.session_state["nav_page"] = page_name
+    st.session_state["_pending_nav_page"] = page_name
     st.session_state["cliente_index"] = 0
     st.rerun()
 
@@ -1093,6 +1093,10 @@ st.markdown(
 with st.sidebar:
     st.markdown("### Navegação")
     NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Carteira", "Histórico", "Régua", "Base de títulos", "Segurança"]
+    if "_pending_nav_page" in st.session_state:
+        pending_page = st.session_state.pop("_pending_nav_page")
+        if pending_page in NAV_OPTIONS:
+            st.session_state["nav_page"] = pending_page
     if "nav_page" not in st.session_state or st.session_state["nav_page"] not in NAV_OPTIONS:
         st.session_state["nav_page"] = "Dashboard"
     page = st.radio(
@@ -1107,7 +1111,7 @@ with st.sidebar:
         for k in list(st.session_state.keys()):
             if k.startswith("fila_") or k.startswith("cliente_"):
                 del st.session_state[k]
-        st.session_state["nav_page"] = "Dashboard"
+        st.session_state["_pending_nav_page"] = "Dashboard"
         st.rerun()
     
 
@@ -1286,7 +1290,7 @@ elif page == "Fila por cliente":
             st.session_state["cliente_resp"] = st.session_state.get("fila_resp", "Todos")
             st.session_state["cliente_gerente"] = st.session_state.get("fila_gerente", "Todos")
             st.session_state["cliente_vendedor"] = st.session_state.get("fila_vendedor", "Todos")
-            st.session_state["nav_page"] = "Cliente"
+            st.session_state["_pending_nav_page"] = "Cliente"
             st.rerun()
 
         filtered["Valor total"] = filtered["saldo_total"].apply(br_money)
