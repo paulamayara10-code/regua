@@ -35,7 +35,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM Financeiro de Cobrança"
-APP_VERSION = "v1.9 - filtros funcionais e próximo cliente"
+APP_VERSION = "v2.1 - clientes especiais e agenda de retorno"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -70,6 +70,7 @@ ACTION_OPTIONS = [
     "Em conferência pelo cliente",
     "Encaminhado ao jurídico",
     "Pagamento identificado manualmente",
+    "Agendar retorno",
     "Outro",
 ]
 
@@ -281,6 +282,8 @@ def init_db() -> None:
             nome_cliente TEXT,
             vendedor TEXT DEFAULT '',
             gerente TEXT DEFAULT '',
+            tipo_cliente TEXT DEFAULT 'Não especial',
+            cobrador TEXT DEFAULT '',
             observacao TEXT DEFAULT '',
             created_at TEXT,
             updated_at TEXT
@@ -330,6 +333,35 @@ def init_db() -> None:
         )
         """
     )
+
+
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agenda_retorno (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cliente_id TEXT,
+            cliente_codigo TEXT,
+            loja TEXT,
+            nome_cliente TEXT,
+            data_retorno TEXT,
+            motivo TEXT,
+            responsavel TEXT,
+            status TEXT DEFAULT 'Pendente',
+            data_conclusao TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+
+    def ensure_column(table: str, column: str, definition: str) -> None:
+        cols = [r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()]
+        if column not in cols:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    ensure_column("clientes", "tipo_cliente", "TEXT DEFAULT 'Não especial'")
+    ensure_column("clientes", "cobrador", "TEXT DEFAULT ''")
 
     cur.execute("SELECT COUNT(*) AS total FROM regua_cobranca")
     if cur.fetchone()["total"] == 0:
@@ -699,6 +731,63 @@ def load_historico(titulo_id: Optional[str] = None) -> pd.DataFrame:
     return df
 
 
+
+def update_cliente_meta(cliente_codigo: str, loja: str, nome_cliente: str, tipo_cliente: str, cobrador: str) -> None:
+    """Salva tipo de cliente e responsável da cobrança no cadastro do cliente."""
+    backup_db("antes_cliente_meta")
+    conn = get_conn()
+    now = datetime.now().isoformat(timespec="seconds")
+    cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
+    upsert_cliente_cadastro(conn, cliente_codigo, loja, nome_cliente, tipo_cliente=tipo_cliente, cobrador=cobrador)
+    conn.execute(
+        "UPDATE clientes SET tipo_cliente = ?, cobrador = ?, updated_at = ? WHERE cliente_id = ?",
+        (tipo_cliente or "Não especial", cobrador.strip(), now, cid),
+    )
+    conn.commit()
+    conn.close()
+
+
+def add_agenda_retorno(cliente_codigo: str, loja: str, nome_cliente: str, data_retorno: date, motivo: str, responsavel: str) -> None:
+    """Inclui um lembrete de retorno por cliente. Não altera o histórico já existente."""
+    backup_db("antes_agenda")
+    conn = get_conn()
+    now = datetime.now().isoformat(timespec="seconds")
+    cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
+    conn.execute(
+        """
+        INSERT INTO agenda_retorno (cliente_id, cliente_codigo, loja, nome_cliente, data_retorno, motivo, responsavel, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'Pendente', ?, ?)
+        """,
+        (cid, cliente_codigo, loja, nome_cliente, data_retorno.isoformat(), motivo.strip(), responsavel.strip(), now, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_agenda(status: str = "Pendente") -> pd.DataFrame:
+    conn = get_conn()
+    query = "SELECT * FROM agenda_retorno"
+    params = []
+    if status != "Todos":
+        query += " WHERE status = ?"
+        params.append(status)
+    query += " ORDER BY data_retorno ASC, nome_cliente ASC"
+    df = pd.read_sql_query(query, conn, params=params)
+    conn.close()
+    return df
+
+
+def concluir_agenda(agenda_id: int) -> None:
+    backup_db("antes_concluir_agenda")
+    conn = get_conn()
+    now = datetime.now().isoformat(timespec="seconds")
+    conn.execute(
+        "UPDATE agenda_retorno SET status = 'Concluído', data_conclusao = ?, updated_at = ? WHERE id = ?",
+        (date.today().isoformat(), now, int(agenda_id)),
+    )
+    conn.commit()
+    conn.close()
+
 def update_titulo_fields(titulo_id: str, vendedor: str, gerente: str, observacao: str) -> None:
     conn = get_conn()
     conn.execute(
@@ -727,26 +816,28 @@ def load_clientes() -> pd.DataFrame:
     return df
 
 
-def upsert_cliente_cadastro(conn: sqlite3.Connection, cliente_codigo: str, loja: str, nome_cliente: str, vendedor: str = "", gerente: str = "", observacao: str = "") -> None:
+def upsert_cliente_cadastro(conn: sqlite3.Connection, cliente_codigo: str, loja: str, nome_cliente: str, vendedor: str = "", gerente: str = "", observacao: str = "", tipo_cliente: str = "Não especial", cobrador: str = "") -> None:
     now = datetime.now().isoformat(timespec="seconds")
     cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
     conn.execute(
         """
-        INSERT INTO clientes (cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente, observacao, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO clientes (cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente, tipo_cliente, cobrador, observacao, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(cliente_id) DO UPDATE SET
             nome_cliente = excluded.nome_cliente,
             vendedor = CASE WHEN excluded.vendedor != '' THEN excluded.vendedor ELSE clientes.vendedor END,
             gerente = CASE WHEN excluded.gerente != '' THEN excluded.gerente ELSE clientes.gerente END,
+            tipo_cliente = CASE WHEN excluded.tipo_cliente != '' THEN excluded.tipo_cliente ELSE COALESCE(clientes.tipo_cliente, 'Não especial') END,
+            cobrador = CASE WHEN excluded.cobrador != '' THEN excluded.cobrador ELSE COALESCE(clientes.cobrador, '') END,
             observacao = CASE WHEN excluded.observacao != '' THEN excluded.observacao ELSE clientes.observacao END,
             updated_at = excluded.updated_at
         """,
-        (cid, cliente_codigo, loja, nome_cliente, vendedor.strip(), gerente.strip(), observacao.strip(), now, now),
+        (cid, cliente_codigo, loja, nome_cliente, vendedor.strip(), gerente.strip(), tipo_cliente.strip() or "Não especial", cobrador.strip(), observacao.strip(), now, now),
     )
 
 
 def get_cliente_cadastro_map(conn: sqlite3.Connection) -> Dict[str, Dict[str, str]]:
-    df = pd.read_sql_query("SELECT cliente_id, vendedor, gerente, observacao FROM clientes", conn)
+    df = pd.read_sql_query("SELECT cliente_id, vendedor, gerente, observacao, tipo_cliente, cobrador FROM clientes", conn)
     if df.empty:
         return {}
     return df.set_index("cliente_id").to_dict(orient="index")
@@ -965,6 +1056,10 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
     if fila.empty:
         return fila
 
+    conn = get_conn()
+    cad_map = get_cliente_cadastro_map(conn)
+    conn.close()
+
     rows = []
     group_cols = ["cliente_codigo", "loja", "nome_cliente"]
     for keys, grp in fila.groupby(group_cols, dropna=False):
@@ -980,6 +1075,10 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
                 promessas_validas.append(dtp)
         promessa_cliente = min(promessas_validas).isoformat() if promessas_validas else None
 
+        cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
+        cad = cad_map.get(cid, {})
+        tipo_cliente = str(cad.get("tipo_cliente", "Não especial") or "Não especial")
+        cobrador = str(cad.get("cobrador", "") or "")
         acao = get_action_for_day(max_ciclo, str(grp["status"].iloc[0]), promessa_cliente, ref)
         rows.append({
             "cliente_id": f"{cliente_codigo}|{loja}|{nome_cliente}",
@@ -997,6 +1096,8 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
             "prioridade": int(acao["prioridade"]),
             "vendedor": _join_unique(grp["vendedor"]),
             "gerente": _join_unique(grp["gerente"]),
+            "tipo_cliente": tipo_cliente,
+            "cobrador": cobrador,
             "valor_prioridade": float(grp["saldo_atual"].sum()) * (max_dias + 1),
         })
     out = pd.DataFrame(rows)
@@ -1015,6 +1116,8 @@ def apply_fila_filters(fila: pd.DataFrame, prefix: str = "fila") -> pd.DataFrame
     resp_filter = st.session_state.get(f"{prefix}_resp", "Todos")
     gerente_filter = st.session_state.get(f"{prefix}_gerente", "Todos")
     vendedor_filter = st.session_state.get(f"{prefix}_vendedor", "Todos")
+    tipo_cliente_filter = st.session_state.get(f"{prefix}_tipo_cliente", "Todos")
+    cobrador_filter = st.session_state.get(f"{prefix}_cobrador", "Todos")
 
     if cliente_search:
         filtered = filtered[filtered["nome_cliente"].str.contains(cliente_search, case=False, na=False)]
@@ -1030,6 +1133,10 @@ def apply_fila_filters(fila: pd.DataFrame, prefix: str = "fila") -> pd.DataFrame
         filtered = filtered[filtered["gerente"].replace("", "Sem gerente") == gerente_filter]
     if vendedor_filter and vendedor_filter != "Todos":
         filtered = filtered[filtered["vendedor"].replace("", "Sem vendedor") == vendedor_filter]
+    if tipo_cliente_filter and tipo_cliente_filter != "Todos":
+        filtered = filtered[filtered["tipo_cliente"].fillna("Não especial") == tipo_cliente_filter]
+    if cobrador_filter and cobrador_filter != "Todos":
+        filtered = filtered[filtered["cobrador"].replace("", "Sem cobrador") == cobrador_filter]
     return filtered
 
 
@@ -1092,7 +1199,7 @@ st.markdown(
 
 with st.sidebar:
     st.markdown("### Navegação")
-    NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Carteira", "Histórico", "Régua", "Base de títulos", "Segurança"]
+    NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Agenda", "Carteira", "Histórico", "Régua", "Base de títulos", "Segurança"]
     if "_pending_nav_page" in st.session_state:
         pending_page = st.session_state.pop("_pending_nav_page")
         if pending_page in NAV_OPTIONS:
@@ -1319,6 +1426,9 @@ elif page == "Cliente":
         cfilter4, cfilter5 = st.columns(2)
         cfilter4.selectbox("Gerente", ["Todos"] + sorted(fila_clientes["gerente"].replace("", "Sem gerente").dropna().unique().tolist()), key="cliente_gerente")
         cfilter5.selectbox("Vendedor", ["Todos"] + sorted(fila_clientes["vendedor"].replace("", "Sem vendedor").dropna().unique().tolist()), key="cliente_vendedor")
+        cfilter6, cfilter7 = st.columns(2)
+        cfilter6.selectbox("Tipo de cliente", ["Todos", "Especial", "Não especial"], key="cliente_tipo_cliente")
+        cfilter7.selectbox("Cobrador", ["Todos"] + sorted(fila_clientes["cobrador"].replace("", "Sem cobrador").dropna().unique().tolist()), key="cliente_cobrador")
 
         options = apply_fila_filters(fila_clientes, prefix="cliente")
         # Segurança extra: garante que cada cliente apareça uma única vez no seletor.
@@ -1386,6 +1496,19 @@ elif page == "Cliente":
                 hide_index=True,
             )
 
+        st.markdown("#### Carteira de cobrança")
+        tipo_atual = str(selected.get("tipo_cliente", "Não especial") or "Não especial")
+        cobrador_atual = str(selected.get("cobrador", "") or "")
+        with st.form("form_carteira_cliente"):
+            cm1, cm2 = st.columns(2)
+            tipo_cliente = cm1.selectbox("Tipo de cliente", ["Não especial", "Especial"], index=0 if tipo_atual != "Especial" else 1)
+            cobrador = cm2.text_input("Pessoa responsável pela cobrança", value=cobrador_atual, placeholder="Ex.: Cobrança Especial / Cobrança Padrão / nome")
+            salvar_meta = st.form_submit_button("Salvar carteira do cliente", type="primary")
+            if salvar_meta:
+                update_cliente_meta(cliente_codigo, loja, nome_cliente, tipo_cliente, cobrador)
+                st.success("Carteira do cliente atualizada.")
+                st.rerun()
+
         st.markdown("#### Responsáveis do cliente/títulos")
         vendedor_padrao = str(selected["vendedor"] or "")
         gerente_padrao = str(selected["gerente"] or "")
@@ -1412,12 +1535,17 @@ elif page == "Cliente":
             responsavel = a2.text_input("Responsável pela ação", value="Financeiro")
             data_acao = a3.date_input("Data da ação", value=data_ref, format="DD/MM/YYYY")
             promessa = None
+            retorno = None
             if tipo == "Promessa de pagamento":
                 promessa = st.date_input("Data prometida para pagamento", value=data_ref, format="DD/MM/YYYY")
+            if tipo in ["Cliente solicitou retorno", "Agendar retorno"]:
+                retorno = st.date_input("Cobrar novamente em", value=data_ref, format="DD/MM/YYYY")
             observacao = st.text_area("Observação da ação", height=100, placeholder="Ex.: cliente informou que pagará após liberação interna...")
             salvar_acao = st.form_submit_button("Registrar no histórico do cliente", type="primary")
             if salvar_acao:
                 total = add_action_cliente(cliente_codigo, loja, nome_cliente, data_acao, tipo, responsavel, observacao, promessa)
+                if retorno:
+                    add_agenda_retorno(cliente_codigo, loja, nome_cliente, retorno, observacao or tipo, responsavel)
                 st.success(f"Ação registrada para {total} título(s) aberto(s) do cliente. Indo para o próximo cliente da fila.")
                 advance_cliente_index(total_options)
                 st.rerun()
@@ -1463,7 +1591,9 @@ elif page == "Cliente":
             conn.close()
         rel_tit = all_titulos_cliente.copy()
         if not rel_tit.empty:
-            rel_tit = rel_tit[["nome_cliente", "numero_titulo", "parcela", "tipo", "vencimento", "valor_titulo", "saldo_atual", "status", "vendedor", "gerente", "primeira_aparicao", "ultima_aparicao", "data_baixa", "observacao_atual"]]
+            rel_tit["tipo_cliente"] = str(selected.get("tipo_cliente", "Não especial") or "Não especial")
+            rel_tit["cobrador"] = str(selected.get("cobrador", "") or "")
+            rel_tit = rel_tit[["nome_cliente", "tipo_cliente", "cobrador", "numero_titulo", "parcela", "tipo", "vencimento", "valor_titulo", "saldo_atual", "status", "vendedor", "gerente", "primeira_aparicao", "ultima_aparicao", "data_baixa", "observacao_atual"]]
         rel_hist = hist_export.copy()
         if not rel_hist.empty:
             rel_hist = rel_hist.merge(all_titulos_cliente[["titulo_id", "numero_titulo", "parcela", "nome_cliente"]], on="titulo_id", how="left")
@@ -1481,13 +1611,52 @@ elif page == "Cliente":
             csv = rel_tit.to_csv(index=False, sep=";", encoding="utf-8-sig")
             st.download_button("Baixar títulos do cliente em CSV", csv, file_name="relatorio_cliente.csv", mime="text/csv", use_container_width=True)
 
+
+elif page == "Agenda":
+    st.markdown("### Agenda de retorno")
+    agenda = load_agenda("Todos")
+    if agenda.empty:
+        st.info("Nenhum retorno agendado.")
+    else:
+        hoje = data_ref
+        agenda["data_dt"] = pd.to_datetime(agenda["data_retorno"], errors="coerce").dt.date
+        pend = agenda[agenda["status"] == "Pendente"].copy()
+        vencidos = pend[pend["data_dt"] < hoje]
+        hoje_df = pend[pend["data_dt"] == hoje]
+        futuros = pend[pend["data_dt"] > hoje]
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Retornos hoje", len(hoje_df))
+        a2.metric("Atrasados", len(vencidos))
+        a3.metric("Futuros", len(futuros))
+
+        filtro_status = st.selectbox("Status", ["Pendente", "Concluído", "Todos"])
+        show = load_agenda(filtro_status)
+        if not show.empty:
+            show["Data retorno"] = pd.to_datetime(show["data_retorno"], errors="coerce").dt.strftime("%d/%m/%Y")
+            st.dataframe(
+                show[["id", "Data retorno", "nome_cliente", "responsavel", "motivo", "status"]].rename(columns={
+                    "id": "ID", "nome_cliente": "Cliente", "responsavel": "Responsável", "motivo": "Motivo", "status": "Status"
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+            pend_ids = show.loc[show["status"] == "Pendente", "id"].tolist()
+            if pend_ids:
+                with st.form("concluir_agenda_form"):
+                    agenda_id = st.selectbox("Marcar retorno como concluído", pend_ids)
+                    concluir = st.form_submit_button("Concluir retorno", type="primary")
+                    if concluir:
+                        concluir_agenda(int(agenda_id))
+                        st.success("Retorno concluído.")
+                        st.rerun()
+
 elif page == "Carteira":
     st.markdown("### Carteira comercial")
     fila = prepare_fila_clientes(data_ref)
     if fila.empty:
         st.warning("Não há títulos em cobrança.")
     else:
-        tab1, tab2 = st.tabs(["Gerente", "Vendedor"])
+        tab1, tab2, tab3, tab4 = st.tabs(["Gerente", "Vendedor", "Tipo de cliente", "Cobrador"] )
         with tab1:
             df = fila.copy()
             df["gerente"] = df["gerente"].replace("", "Sem gerente")
@@ -1510,6 +1679,18 @@ elif page == "Carteira":
             ).sort_values("Valor", ascending=False)
             v_show = v.copy(); v_show["Valor"] = v_show["Valor"].apply(br_money)
             st.dataframe(v_show.rename(columns={"vendedor":"Vendedor", "Maior_atraso":"Maior atraso"}), use_container_width=True, hide_index=True)
+        with tab3:
+            df = fila.copy()
+            df["tipo_cliente"] = df["tipo_cliente"].fillna("Não especial")
+            t = df.groupby("tipo_cliente", as_index=False).agg(Clientes=("cliente_id", "count"), Titulos=("qtd_titulos", "sum"), Valor=("saldo_total", "sum"), Maior_atraso=("maior_dias_atraso", "max")).sort_values("Valor", ascending=False)
+            t_show = t.copy(); t_show["Valor"] = t_show["Valor"].apply(br_money)
+            st.dataframe(t_show.rename(columns={"tipo_cliente":"Tipo de cliente", "Maior_atraso":"Maior atraso"}), use_container_width=True, hide_index=True)
+        with tab4:
+            df = fila.copy()
+            df["cobrador"] = df["cobrador"].replace("", "Sem cobrador")
+            c = df.groupby("cobrador", as_index=False).agg(Clientes=("cliente_id", "count"), Titulos=("qtd_titulos", "sum"), Valor=("saldo_total", "sum"), Maior_atraso=("maior_dias_atraso", "max")).sort_values("Valor", ascending=False)
+            c_show = c.copy(); c_show["Valor"] = c_show["Valor"].apply(br_money)
+            st.dataframe(c_show.rename(columns={"cobrador":"Cobrador", "Maior_atraso":"Maior atraso"}), use_container_width=True, hide_index=True)
 
 
 elif page == "Segurança":
