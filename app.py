@@ -35,7 +35,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM Financeiro de Cobrança"
-APP_VERSION = "v1.8 - persistência e restauração"
+APP_VERSION = "v1.9 - filtros funcionais e próximo cliente"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -850,45 +850,49 @@ def add_action_cliente(cliente_codigo: str, loja: str, nome_cliente: str, data_a
 
     A cobrança é feita uma vez por cliente, mesmo quando existem vários títulos.
     Para preservar rastreabilidade, a ação é gravada em cada título aberto daquele cliente.
+    A gravação é transacional: se qualquer etapa falhar, nada é parcialmente salvo.
     """
     conn = get_conn()
-    now = datetime.now().isoformat(timespec="seconds")
-    promessa_str = promessa.isoformat() if promessa else None
-    where, params = _cliente_where_clause(cliente_codigo, loja, nome_cliente)
-    titulos = pd.read_sql_query(
-        f"SELECT titulo_id FROM titulos WHERE {where} AND status != ?",
-        conn,
-        params=params + [STATUS_PAGO],
-    )
-    if titulos.empty:
-        conn.close()
-        return 0
+    try:
+        now = datetime.now().isoformat(timespec="seconds")
+        promessa_str = promessa.isoformat() if promessa else None
+        where, params = _cliente_where_clause(cliente_codigo, loja, nome_cliente)
+        titulos = pd.read_sql_query(
+            f"SELECT titulo_id FROM titulos WHERE {where} AND status != ?",
+            conn,
+            params=params + [STATUS_PAGO],
+        )
+        if titulos.empty:
+            return 0
 
-    rows = [
-        (tid, data_acao.isoformat(), tipo, responsavel.strip(), observacao.strip(), promessa_str, now)
-        for tid in titulos["titulo_id"].astype(str).tolist()
-    ]
-    conn.executemany(
-        """
-        INSERT INTO historico_acoes (titulo_id, data_acao, tipo_acao, responsavel, observacao, promessa_pagamento, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        rows,
-    )
-    if promessa_str:
-        conn.execute(
-            f"UPDATE titulos SET promessa_pagamento = ?, status = ?, updated_at = ? WHERE {where} AND status != ?",
-            [promessa_str, STATUS_PROMESSA, now] + params + [STATUS_PAGO],
+        rows = [
+            (tid, data_acao.isoformat(), tipo, responsavel.strip(), observacao.strip(), promessa_str, now)
+            for tid in titulos["titulo_id"].astype(str).tolist()
+        ]
+        conn.executemany(
+            """
+            INSERT INTO historico_acoes (titulo_id, data_acao, tipo_acao, responsavel, observacao, promessa_pagamento, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
         )
-    elif tipo == "Pagamento identificado manualmente":
-        conn.execute(
-            f"UPDATE titulos SET status = ?, data_baixa = ?, updated_at = ? WHERE {where} AND status != ?",
-            [STATUS_PAGO, data_acao.isoformat(), now] + params + [STATUS_PAGO],
-        )
-    conn.commit()
-    total = len(rows)
-    conn.close()
-    return total
+        if promessa_str:
+            conn.execute(
+                f"UPDATE titulos SET promessa_pagamento = ?, status = ?, updated_at = ? WHERE {where} AND status != ?",
+                [promessa_str, STATUS_PROMESSA, now] + params + [STATUS_PAGO],
+            )
+        elif tipo == "Pagamento identificado manualmente":
+            conn.execute(
+                f"UPDATE titulos SET status = ?, data_baixa = ?, updated_at = ? WHERE {where} AND status != ?",
+                [STATUS_PAGO, data_acao.isoformat(), now] + params + [STATUS_PAGO],
+            )
+        conn.commit()
+        return len(rows)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def save_regua(df: pd.DataFrame) -> None:
@@ -999,6 +1003,52 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
     return out.sort_values(["prioridade", "valor_prioridade"], ascending=[True, False])
 
 
+
+
+def apply_fila_filters(fila: pd.DataFrame, prefix: str = "fila") -> pd.DataFrame:
+    """Aplica filtros salvos em session_state. Usado pela fila e pela tela do cliente."""
+    if fila.empty:
+        return fila
+    filtered = fila.copy()
+    cliente_search = str(st.session_state.get(f"{prefix}_cliente", "") or "").strip()
+    acao_filter = st.session_state.get(f"{prefix}_acao", "Todas")
+    resp_filter = st.session_state.get(f"{prefix}_resp", "Todos")
+    gerente_filter = st.session_state.get(f"{prefix}_gerente", "Todos")
+    vendedor_filter = st.session_state.get(f"{prefix}_vendedor", "Todos")
+
+    if cliente_search:
+        filtered = filtered[filtered["nome_cliente"].str.contains(cliente_search, case=False, na=False)]
+    if acao_filter and acao_filter != "Todas":
+        filtered = filtered[filtered["acao_do_dia"] == acao_filter]
+    if resp_filter == "Sem vendedor ou gerente":
+        filtered = filtered[(filtered["vendedor"].fillna("") == "") | (filtered["gerente"].fillna("") == "")]
+    elif resp_filter == "Sem vendedor":
+        filtered = filtered[filtered["vendedor"].fillna("") == ""]
+    elif resp_filter == "Sem gerente":
+        filtered = filtered[filtered["gerente"].fillna("") == ""]
+    if gerente_filter and gerente_filter != "Todos":
+        filtered = filtered[filtered["gerente"].replace("", "Sem gerente") == gerente_filter]
+    if vendedor_filter and vendedor_filter != "Todos":
+        filtered = filtered[filtered["vendedor"].replace("", "Sem vendedor") == vendedor_filter]
+    return filtered
+
+
+def set_fila_filter(page_name: str = "Fila por cliente", **filters) -> None:
+    """Define filtros e leva o usuário para a tela de fila/cliente."""
+    for k, v in filters.items():
+        st.session_state[k] = v
+    st.session_state["nav_page"] = page_name
+    st.session_state["cliente_index"] = 0
+    st.rerun()
+
+
+def advance_cliente_index(total_options: int) -> None:
+    if total_options <= 0:
+        st.session_state["cliente_index"] = 0
+    else:
+        atual = int(st.session_state.get("cliente_index", 0) or 0)
+        st.session_state["cliente_index"] = min(atual + 1, total_options - 1)
+
 def load_titulos_cliente(cliente_codigo: str, loja: str, nome_cliente: str, somente_abertos: bool = True) -> pd.DataFrame:
     conn = get_conn()
     where, params = _cliente_where_clause(cliente_codigo, loja, nome_cliente)
@@ -1042,12 +1092,23 @@ st.markdown(
 
 with st.sidebar:
     st.markdown("### Navegação")
+    NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Carteira", "Histórico", "Régua", "Base de títulos", "Segurança"]
+    if "nav_page" not in st.session_state or st.session_state["nav_page"] not in NAV_OPTIONS:
+        st.session_state["nav_page"] = "Dashboard"
     page = st.radio(
         "Selecione",
-        ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Carteira", "Histórico", "Régua", "Base de títulos", "Segurança"],
+        NAV_OPTIONS,
+        key="nav_page",
         label_visibility="collapsed",
     )
     data_ref = st.date_input("Data de referência", value=date.today(), format="DD/MM/YYYY")
+    st.markdown("---")
+    if st.button("Limpar filtros", use_container_width=True):
+        for k in list(st.session_state.keys()):
+            if k.startswith("fila_") or k.startswith("cliente_"):
+                del st.session_state[k]
+        st.session_state["nav_page"] = "Dashboard"
+        st.rerun()
     
 
 
@@ -1141,6 +1202,16 @@ elif page == "Dashboard":
         with c4: metric_card("Recebidos hoje", br_money(recebidos), "Baixas automáticas/manual")
         with c5: metric_card("Ações hoje", f"{acoes_hoje}", f"{promessas} promessas aguardando")
 
+        b1, b2, b3, b4 = st.columns(4)
+        if b1.button("Ver ações de hoje", use_container_width=True):
+            set_fila_filter("Fila por cliente", fila_acao="Todas", fila_resp="Todos")
+        if b2.button("Ver promessas", use_container_width=True):
+            set_fila_filter("Fila por cliente", fila_acao="Aguardar promessa", fila_resp="Todos")
+        if b3.button("Sem vendedor/gerente", use_container_width=True):
+            set_fila_filter("Fila por cliente", fila_resp="Sem vendedor ou gerente")
+        if b4.button("Trabalhar próximo cliente", use_container_width=True):
+            set_fila_filter("Cliente", cliente_acao="Todas", cliente_resp="Todos")
+
         st.markdown("### Ações prioritárias")
         if fila.empty:
             st.success("Nenhuma ação em aberto.")
@@ -1190,18 +1261,33 @@ elif page == "Fila por cliente":
     if fila.empty:
         st.success("Não há clientes em cobrança.")
     else:
-        colf1, colf2, colf3 = st.columns([2, 1, 1])
-        cliente_search = colf1.text_input("Filtrar cliente", placeholder="Digite parte do nome do cliente")
-        acao_filter = colf2.selectbox("Ação", ["Todas"] + sorted(fila["acao_do_dia"].dropna().unique().tolist()))
-        apenas_sem_resp = colf3.checkbox("Sem vendedor/gerente")
+        colf1, colf2, colf3 = st.columns([2, 1.2, 1.4])
+        colf1.text_input("Filtrar cliente", placeholder="Digite parte do nome do cliente", key="fila_cliente")
+        colf2.selectbox("Ação", ["Todas"] + sorted(fila["acao_do_dia"].dropna().unique().tolist()), key="fila_acao")
+        colf3.selectbox("Responsável", ["Todos", "Sem vendedor ou gerente", "Sem vendedor", "Sem gerente"], key="fila_resp")
 
-        filtered = fila.copy()
-        if cliente_search:
-            filtered = filtered[filtered["nome_cliente"].str.contains(cliente_search, case=False, na=False)]
-        if acao_filter != "Todas":
-            filtered = filtered[filtered["acao_do_dia"] == acao_filter]
-        if apenas_sem_resp:
-            filtered = filtered[(filtered["vendedor"].fillna("") == "") | (filtered["gerente"].fillna("") == "")]
+        colf4, colf5 = st.columns(2)
+        gerentes = ["Todos"] + sorted(fila["gerente"].replace("", "Sem gerente").dropna().unique().tolist())
+        vendedores = ["Todos"] + sorted(fila["vendedor"].replace("", "Sem vendedor").dropna().unique().tolist())
+        colf4.selectbox("Gerente", gerentes, key="fila_gerente")
+        colf5.selectbox("Vendedor", vendedores, key="fila_vendedor")
+
+        filtered = apply_fila_filters(fila, prefix="fila")
+
+        at1, at2, at3 = st.columns(3)
+        at1.metric("Clientes filtrados", len(filtered))
+        at2.metric("Títulos", int(filtered["qtd_titulos"].sum()) if not filtered.empty else 0)
+        at3.metric("Valor", br_money(filtered["saldo_total"].sum()) if not filtered.empty else br_money(0))
+
+        if st.button("Abrir primeiro cliente desta fila", type="primary", use_container_width=True, disabled=filtered.empty):
+            st.session_state["cliente_index"] = 0
+            st.session_state["cliente_cliente"] = st.session_state.get("fila_cliente", "")
+            st.session_state["cliente_acao"] = st.session_state.get("fila_acao", "Todas")
+            st.session_state["cliente_resp"] = st.session_state.get("fila_resp", "Todos")
+            st.session_state["cliente_gerente"] = st.session_state.get("fila_gerente", "Todos")
+            st.session_state["cliente_vendedor"] = st.session_state.get("fila_vendedor", "Todos")
+            st.session_state["nav_page"] = "Cliente"
+            st.rerun()
 
         filtered["Valor total"] = filtered["saldo_total"].apply(br_money)
         filtered["Venc. mais antigo"] = pd.to_datetime(filtered["menor_vencimento"], errors="coerce").dt.strftime("%d/%m/%Y")
@@ -1222,15 +1308,47 @@ elif page == "Cliente":
     if fila_clientes.empty:
         st.warning("Não há clientes com títulos abertos. Faça o primeiro upload ou verifique a base.")
     else:
-        options = fila_clientes.copy()
-        # Segurança extra: garante que cada cliente apareça uma única vez no seletor,
-        # mesmo quando houver vários títulos/parcelas abertas na base.
-        options = options.drop_duplicates(subset=["cliente_codigo", "loja", "nome_cliente"], keep="first")
+        cfilter1, cfilter2, cfilter3 = st.columns([2, 1.2, 1.4])
+        cfilter1.text_input("Filtrar cliente", placeholder="Digite parte do nome", key="cliente_cliente")
+        cfilter2.selectbox("Ação", ["Todas"] + sorted(fila_clientes["acao_do_dia"].dropna().unique().tolist()), key="cliente_acao")
+        cfilter3.selectbox("Responsável", ["Todos", "Sem vendedor ou gerente", "Sem vendedor", "Sem gerente"], key="cliente_resp")
+        cfilter4, cfilter5 = st.columns(2)
+        cfilter4.selectbox("Gerente", ["Todos"] + sorted(fila_clientes["gerente"].replace("", "Sem gerente").dropna().unique().tolist()), key="cliente_gerente")
+        cfilter5.selectbox("Vendedor", ["Todos"] + sorted(fila_clientes["vendedor"].replace("", "Sem vendedor").dropna().unique().tolist()), key="cliente_vendedor")
+
+        options = apply_fila_filters(fila_clientes, prefix="cliente")
+        # Segurança extra: garante que cada cliente apareça uma única vez no seletor.
+        options = options.drop_duplicates(subset=["cliente_codigo", "loja", "nome_cliente"], keep="first").reset_index(drop=True)
+        if options.empty:
+            st.warning("Nenhum cliente encontrado com os filtros atuais.")
+            st.stop()
+
+        total_options = len(options)
+        if "cliente_index" not in st.session_state:
+            st.session_state["cliente_index"] = 0
+        st.session_state["cliente_index"] = min(int(st.session_state.get("cliente_index", 0) or 0), total_options - 1)
+
+        nav_a, nav_b, nav_c = st.columns([1, 1, 2])
+        if nav_a.button("Cliente anterior", use_container_width=True, disabled=st.session_state["cliente_index"] <= 0):
+            st.session_state["cliente_index"] = max(st.session_state["cliente_index"] - 1, 0)
+            st.rerun()
+        if nav_b.button("Próximo cliente", use_container_width=True, disabled=st.session_state["cliente_index"] >= total_options - 1):
+            st.session_state["cliente_index"] = min(st.session_state["cliente_index"] + 1, total_options - 1)
+            st.rerun()
+        nav_c.caption(f"Cliente {st.session_state['cliente_index'] + 1} de {total_options} na fila filtrada")
+
         options["label"] = options.apply(
             lambda r: f"{r['nome_cliente']} • {int(r['qtd_titulos'])} título(s) • {br_money(r['saldo_total'])} • {r['acao_do_dia']}", axis=1
         )
-        selected_label = st.selectbox("Selecione o cliente para ação única", options["label"].tolist())
-        selected = options.loc[options["label"] == selected_label].iloc[0]
+        selected_label = st.selectbox(
+            "Selecione o cliente para ação única",
+            options["label"].tolist(),
+            index=int(st.session_state["cliente_index"]),
+            key="cliente_selectbox",
+        )
+        selected_pos = int(options.index[options["label"] == selected_label][0])
+        st.session_state["cliente_index"] = selected_pos
+        selected = options.iloc[selected_pos]
 
         cliente_codigo = str(selected["cliente_codigo"])
         loja = str(selected["loja"])
@@ -1278,7 +1396,8 @@ elif page == "Cliente":
             salvar_resp = st.form_submit_button("Salvar responsáveis/observação em todos os títulos abertos", type="primary")
             if salvar_resp:
                 total = update_cliente_fields(cliente_codigo, loja, nome_cliente, vendedor, gerente, obs_atual)
-                st.success(f"Responsáveis atualizados em {total} título(s) aberto(s).")
+                st.success(f"Responsáveis atualizados em {total} título(s) aberto(s). Indo para o próximo cliente da fila.")
+                advance_cliente_index(total_options)
                 st.rerun()
 
         st.markdown("#### Registrar ação única do cliente")
@@ -1295,7 +1414,8 @@ elif page == "Cliente":
             salvar_acao = st.form_submit_button("Registrar no histórico do cliente", type="primary")
             if salvar_acao:
                 total = add_action_cliente(cliente_codigo, loja, nome_cliente, data_acao, tipo, responsavel, observacao, promessa)
-                st.success(f"Ação registrada para {total} título(s) aberto(s) do cliente.")
+                st.success(f"Ação registrada para {total} título(s) aberto(s) do cliente. Indo para o próximo cliente da fila.")
+                advance_cliente_index(total_options)
                 st.rerun()
 
         st.markdown("#### Histórico do cliente")
