@@ -36,7 +36,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v3.1"
+APP_VERSION = "v3.4"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -1732,7 +1732,7 @@ st.markdown(
 
 with st.sidebar:
     st.markdown("### Navegação")
-    NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Agenda", "Carteira", "Histórico", "Régua", "Base de títulos", "Segurança"]
+    NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Agenda", "Carteira", "Relatórios", "Histórico", "Régua", "Base de títulos", "Segurança"]
     if "_pending_nav_page" in st.session_state:
         pending_page = st.session_state.pop("_pending_nav_page")
         if pending_page in NAV_OPTIONS:
@@ -2266,6 +2266,166 @@ elif page == "Carteira":
             c_show = c.copy(); c_show["Valor"] = c_show["Valor"].apply(br_money)
             st.dataframe(c_show.rename(columns={"cobrador":"Cobrador", "Maior_atraso":"Maior atraso"}), use_container_width=True, hide_index=True)
 
+
+
+elif page == "Relatórios":
+    st.markdown("### Relatórios")
+    fila = prepare_fila_clientes(data_ref)
+    if fila.empty:
+        st.warning("Não há títulos em cobrança para gerar relatório.")
+    else:
+        base = fila.copy()
+        base["vendedor"] = base["vendedor"].fillna("").replace("", "Sem vendedor")
+        base["gerente"] = base["gerente"].fillna("").replace("", "Sem gerente")
+        base["tipo_cliente"] = base["tipo_cliente"].fillna("Não especial").replace("", "Não especial")
+        base["cobrador"] = base["cobrador"].fillna("").replace("", "Sem cobrador")
+
+        st.markdown("<div class='section-card'>", unsafe_allow_html=True)
+        c1, c2, c3 = st.columns(3)
+        modo_rel = c1.selectbox("Agrupar relatório por", ["Vendedor", "Gerente", "Cliente", "Cobrador", "Tipo de cliente"])
+        ordenacao = c2.selectbox("Ordenar por", ["Maior valor", "Maior atraso", "Cliente A-Z"])
+        formato = c3.selectbox("Formato", ["Resumo e títulos", "Somente resumo", "Somente títulos"])
+
+        f1, f2, f3 = st.columns(3)
+        vendedores_sel = f1.multiselect("Vendedor", sorted(base["vendedor"].dropna().unique().tolist()))
+        gerentes_sel = f2.multiselect("Gerente", sorted(base["gerente"].dropna().unique().tolist()))
+        tipos_sel = f3.multiselect("Tipo de cliente", sorted(base["tipo_cliente"].dropna().unique().tolist()))
+
+        f4, f5, f6 = st.columns(3)
+        cobradores_sel = f4.multiselect("Cobrador", sorted(base["cobrador"].dropna().unique().tolist()))
+        acao_sel = f5.multiselect("Ação do dia", sorted(base["acao_do_dia"].dropna().unique().tolist()))
+        aging_sel = f6.multiselect("Faixa de atraso", ["0-30", "31-60", "61-90", "91-180", "180+"])
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        rel = base.copy()
+        if vendedores_sel:
+            rel = rel[rel["vendedor"].isin(vendedores_sel)]
+        if gerentes_sel:
+            rel = rel[rel["gerente"].isin(gerentes_sel)]
+        if tipos_sel:
+            rel = rel[rel["tipo_cliente"].isin(tipos_sel)]
+        if cobradores_sel:
+            rel = rel[rel["cobrador"].isin(cobradores_sel)]
+        if acao_sel:
+            rel = rel[rel["acao_do_dia"].isin(acao_sel)]
+
+        def faixa_atraso(dias: int) -> str:
+            try:
+                d = int(dias)
+            except Exception:
+                d = 0
+            if d <= 30:
+                return "0-30"
+            if d <= 60:
+                return "31-60"
+            if d <= 90:
+                return "61-90"
+            if d <= 180:
+                return "91-180"
+            return "180+"
+
+        rel["faixa_atraso"] = rel["maior_dias_atraso"].apply(faixa_atraso)
+        if aging_sel:
+            rel = rel[rel["faixa_atraso"].isin(aging_sel)]
+
+        if ordenacao == "Maior valor":
+            rel = rel.sort_values("saldo_total", ascending=False)
+        elif ordenacao == "Maior atraso":
+            rel = rel.sort_values("maior_dias_atraso", ascending=False)
+        else:
+            rel = rel.sort_values("nome_cliente", ascending=True)
+
+        total_valor = float(rel["saldo_total"].sum()) if not rel.empty else 0.0
+        colm1, colm2, colm3, colm4 = st.columns(4)
+        colm1.metric("Valor filtrado", br_money(total_valor))
+        colm2.metric("Clientes", int(rel["cliente_id"].nunique()) if not rel.empty else 0)
+        colm3.metric("Títulos", int(rel["qtd_titulos"].sum()) if not rel.empty else 0)
+        colm4.metric("Maior atraso", int(rel["maior_dias_atraso"].max()) if not rel.empty else 0)
+
+        grupo_col = {
+            "Vendedor": "vendedor",
+            "Gerente": "gerente",
+            "Cliente": "nome_cliente",
+            "Cobrador": "cobrador",
+            "Tipo de cliente": "tipo_cliente",
+        }[modo_rel]
+
+        resumo = pd.DataFrame()
+        if not rel.empty:
+            resumo = rel.groupby(grupo_col, as_index=False).agg(
+                Clientes=("cliente_id", "nunique"),
+                Titulos=("qtd_titulos", "sum"),
+                Valor=("saldo_total", "sum"),
+                Maior_atraso=("maior_dias_atraso", "max"),
+            ).sort_values("Valor", ascending=False)
+            resumo_show = resumo.copy()
+            resumo_show["Valor"] = resumo_show["Valor"].apply(br_money)
+            resumo_show = resumo_show.rename(columns={grupo_col: modo_rel, "Maior_atraso": "Maior atraso"})
+        else:
+            resumo_show = pd.DataFrame(columns=[modo_rel, "Clientes", "Titulos", "Valor", "Maior atraso"])
+
+        detalhes = rel[[
+            "nome_cliente", "saldo_total", "qtd_titulos", "maior_dias_atraso", "faixa_atraso",
+            "acao_do_dia", "vendedor", "gerente", "tipo_cliente", "cobrador", "menor_vencimento"
+        ]].copy() if not rel.empty else pd.DataFrame()
+        if not detalhes.empty:
+            detalhes_export = detalhes.copy()
+            detalhes_export["saldo_total"] = detalhes_export["saldo_total"].apply(br_money)
+            detalhes_export = detalhes_export.rename(columns={
+                "nome_cliente": "Cliente", "saldo_total": "Valor em aberto", "qtd_titulos": "Títulos",
+                "maior_dias_atraso": "Maior atraso", "faixa_atraso": "Faixa de atraso", "acao_do_dia": "Ação do dia",
+                "vendedor": "Vendedor", "gerente": "Gerente", "tipo_cliente": "Tipo de cliente", "cobrador": "Cobrador",
+                "menor_vencimento": "Menor vencimento"
+            })
+        else:
+            detalhes_export = pd.DataFrame()
+
+        if formato in ["Resumo e títulos", "Somente resumo"]:
+            st.markdown("#### Resumo")
+            st.dataframe(resumo_show, use_container_width=True, hide_index=True)
+        if formato in ["Resumo e títulos", "Somente títulos"]:
+            st.markdown("#### Clientes/títulos agrupados")
+            st.dataframe(detalhes_export, use_container_width=True, hide_index=True)
+
+        # Exporta também os títulos detalhados dos clientes filtrados.
+        titulos_export = pd.DataFrame()
+        if not rel.empty:
+            frames = []
+            for _, r in rel.iterrows():
+                tcli = load_titulos_cliente(str(r["cliente_codigo"]), str(r["loja"]), str(r["nome_cliente"]), somente_abertos=True)
+                if not tcli.empty:
+                    frames.append(tcli)
+            if frames:
+                titulos_export = pd.concat(frames, ignore_index=True)
+                keep_cols = [c for c in [
+                    "nome_cliente", "cliente_codigo", "loja", "prefixo", "numero_titulo", "parcela", "tipo", "emissao", "vencimento",
+                    "valor_titulo", "saldo_atual", "dias_atraso", "status", "vendedor", "gerente", "observacao_atual"
+                ] if c in titulos_export.columns]
+                titulos_export = titulos_export[keep_cols]
+                titulos_export = titulos_export.rename(columns={
+                    "nome_cliente": "Cliente", "cliente_codigo": "Cód. Cliente", "loja": "Loja", "prefixo": "Prefixo",
+                    "numero_titulo": "Título", "parcela": "Parcela", "tipo": "Tipo", "emissao": "Emissão", "vencimento": "Vencimento",
+                    "valor_titulo": "Valor título", "saldo_atual": "Saldo em aberto", "dias_atraso": "Dias atraso", "status": "Status",
+                    "vendedor": "Vendedor", "gerente": "Gerente", "observacao_atual": "Observação"
+                })
+
+        sheets = {}
+        if formato in ["Resumo e títulos", "Somente resumo"]:
+            sheets["Resumo"] = resumo_show
+        if formato in ["Resumo e títulos", "Somente títulos"]:
+            sheets["Clientes agrupados"] = detalhes_export
+        if not titulos_export.empty:
+            sheets["Titulos detalhados"] = titulos_export
+
+        if sheets:
+            excel_bytes = safe_to_excel_bytes(sheets)
+            st.download_button(
+                "Exportar relatório em Excel",
+                data=excel_bytes,
+                file_name=f"relatorio_cobranca_{modo_rel.lower().replace(' ', '_')}_{date.today().isoformat()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
 elif page == "Segurança":
     st.markdown("### Segurança dos dados")
