@@ -36,7 +36,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v3.0"
+APP_VERSION = "v3.1"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -1101,21 +1101,56 @@ def update_cliente_meta(cliente_codigo: str, loja: str, nome_cliente: str, tipo_
     conn.close()
 
 
-def add_agenda_retorno(cliente_codigo: str, loja: str, nome_cliente: str, data_retorno: date, motivo: str, responsavel: str) -> None:
-    """Inclui um lembrete de retorno por cliente. Não altera o histórico já existente."""
+def add_agenda_retorno(cliente_codigo: str, loja: str, nome_cliente: str, data_retorno: date, motivo: str, responsavel: str) -> str:
+    """Inclui ou atualiza um lembrete pendente por cliente/data.
+
+    Evita duplicidade quando o usuário clica em salvar mais de uma vez.
+    A chave prática é: mesmo cliente + mesma data de retorno + status pendente.
+    """
     backup_db("antes_agenda")
     conn = get_conn()
     now = datetime.now().isoformat(timespec="seconds")
     cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
-    conn.execute(
+    data_iso = data_retorno.isoformat()
+    motivo_limpo = (motivo or "Retorno programado").strip()
+    responsavel_limpo = (responsavel or "Financeiro").strip()
+
+    existente = conn.execute(
         """
-        INSERT INTO agenda_retorno (cliente_id, cliente_codigo, loja, nome_cliente, data_retorno, motivo, responsavel, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'Pendente', ?, ?)
+        SELECT id
+        FROM agenda_retorno
+        WHERE cliente_id = ?
+          AND data_retorno = ?
+          AND status = 'Pendente'
+        ORDER BY id DESC
+        LIMIT 1
         """,
-        (cid, cliente_codigo, loja, nome_cliente, data_retorno.isoformat(), motivo.strip(), responsavel.strip(), now, now),
-    )
+        (cid, data_iso),
+    ).fetchone()
+
+    if existente:
+        conn.execute(
+            """
+            UPDATE agenda_retorno
+               SET motivo = ?, responsavel = ?, nome_cliente = ?, cliente_codigo = ?, loja = ?, updated_at = ?
+             WHERE id = ?
+            """,
+            (motivo_limpo, responsavel_limpo, nome_cliente, cliente_codigo, loja, now, int(existente[0])),
+        )
+        resultado = "atualizado"
+    else:
+        conn.execute(
+            """
+            INSERT INTO agenda_retorno (cliente_id, cliente_codigo, loja, nome_cliente, data_retorno, motivo, responsavel, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'Pendente', ?, ?)
+            """,
+            (cid, cliente_codigo, loja, nome_cliente, data_iso, motivo_limpo, responsavel_limpo, now, now),
+        )
+        resultado = "incluído"
+
     conn.commit()
     conn.close()
+    return resultado
 
 
 def load_agenda(status: str = "Pendente") -> pd.DataFrame:
@@ -1895,12 +1930,9 @@ elif page == "Cliente":
                 promessa = p1.date_input("Data prometida para pagamento", value=data_ref, format="DD/MM/YYYY")
 
             agendar_retorno = p2.checkbox("Agendar nova cobrança/retorno", value=tipo in ["Cliente solicitou retorno", "Agendar retorno"])
-            retorno = None
-            motivo_retorno = ""
-            if agendar_retorno:
-                ag1, ag2 = st.columns([1, 2])
-                retorno = ag1.date_input("Data do próximo contato", value=data_ref, format="DD/MM/YYYY")
-                motivo_retorno = ag2.text_input("Motivo do retorno", value="Cobrar novamente")
+            ag1, ag2 = st.columns([1, 2])
+            retorno = ag1.date_input("Data do próximo contato", value=data_ref, format="DD/MM/YYYY", disabled=not agendar_retorno)
+            motivo_retorno = ag2.text_input("Motivo do retorno", value="Cobrar novamente", disabled=not agendar_retorno)
 
             observacao = st.text_area("Observação da ação", height=100, placeholder="Ex.: cliente informou que pagará após liberação interna...")
             salvar_tudo = st.form_submit_button("Salvar todas as alterações", type="primary", use_container_width=True)
@@ -1915,10 +1947,13 @@ elif page == "Cliente":
                     total_acao = add_action_cliente(cliente_codigo, loja, nome_cliente, data_acao, tipo, responsavel, obs_limpa, promessa)
                     mensagens.append(f"Ação registrada para {total_acao} título(s).")
 
-                if retorno:
+                if agendar_retorno and retorno:
                     motivo_final = clean_history_text(motivo_retorno or obs_limpa or tipo or "Retorno programado")
-                    add_agenda_retorno(cliente_codigo, loja, nome_cliente, retorno, motivo_final, responsavel or cobrador or "Financeiro")
-                    mensagens.append(f"Retorno agendado para {retorno.strftime('%d/%m/%Y')}.")
+                    status_agenda = add_agenda_retorno(cliente_codigo, loja, nome_cliente, retorno, motivo_final, responsavel or cobrador or "Financeiro")
+                    if status_agenda == "atualizado":
+                        mensagens.append(f"Retorno de {retorno.strftime('%d/%m/%Y')} já existia e foi atualizado, sem duplicar agenda.")
+                    else:
+                        mensagens.append(f"Retorno agendado para {retorno.strftime('%d/%m/%Y')}.")
 
                 st.success(" ".join(mensagens) + " Cliente mantido na tela.")
                 st.session_state["cliente_index"] = selected_pos
