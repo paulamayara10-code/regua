@@ -36,7 +36,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v3.4"
+APP_VERSION = "v3.6"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -1102,10 +1102,10 @@ def update_cliente_meta(cliente_codigo: str, loja: str, nome_cliente: str, tipo_
 
 
 def add_agenda_retorno(cliente_codigo: str, loja: str, nome_cliente: str, data_retorno: date, motivo: str, responsavel: str) -> str:
-    """Inclui ou atualiza um lembrete pendente por cliente/data.
+    """Inclui ou atualiza o único lembrete pendente do cliente.
 
-    Evita duplicidade quando o usuário clica em salvar mais de uma vez.
-    A chave prática é: mesmo cliente + mesma data de retorno + status pendente.
+    Evita duplicidade quando o usuário clica em salvar mais de uma vez ou troca a data do retorno.
+    Regra prática: um cliente deve ter apenas uma agenda pendente ativa; se já existir, atualiza a data.
     """
     backup_db("antes_agenda")
     conn = get_conn()
@@ -1120,22 +1120,21 @@ def add_agenda_retorno(cliente_codigo: str, loja: str, nome_cliente: str, data_r
         SELECT id
         FROM agenda_retorno
         WHERE cliente_id = ?
-          AND data_retorno = ?
           AND status = 'Pendente'
         ORDER BY id DESC
         LIMIT 1
         """,
-        (cid, data_iso),
+        (cid,),
     ).fetchone()
 
     if existente:
         conn.execute(
             """
             UPDATE agenda_retorno
-               SET motivo = ?, responsavel = ?, nome_cliente = ?, cliente_codigo = ?, loja = ?, updated_at = ?
+               SET data_retorno = ?, motivo = ?, responsavel = ?, nome_cliente = ?, cliente_codigo = ?, loja = ?, updated_at = ?
              WHERE id = ?
             """,
-            (motivo_limpo, responsavel_limpo, nome_cliente, cliente_codigo, loja, now, int(existente[0])),
+            (data_iso, motivo_limpo, responsavel_limpo, nome_cliente, cliente_codigo, loja, now, int(existente[0])),
         )
         resultado = "atualizado"
     else:
@@ -1434,21 +1433,20 @@ def save_cliente_all(
                 SELECT id
                   FROM agenda_retorno
                  WHERE cliente_id = ?
-                   AND data_retorno = ?
                    AND status = 'Pendente'
                  ORDER BY id DESC
                  LIMIT 1
                 """,
-                (cid, data_iso),
+                (cid,),
             ).fetchone()
             if existente:
                 conn.execute(
                     """
                     UPDATE agenda_retorno
-                       SET motivo = ?, responsavel = ?, nome_cliente = ?, cliente_codigo = ?, loja = ?, updated_at = ?
+                       SET data_retorno = ?, motivo = ?, responsavel = ?, nome_cliente = ?, cliente_codigo = ?, loja = ?, updated_at = ?
                      WHERE id = ?
                     """,
-                    (motivo_limpo, responsavel_acao, nome_cliente, cliente_codigo, loja, now, int(existente[0])),
+                    (data_iso, motivo_limpo, responsavel_acao, nome_cliente, cliente_codigo, loja, now, int(existente[0])),
                 )
                 agenda_status = "atualizada"
             else:
@@ -2051,35 +2049,57 @@ elif page == "Cliente":
         if not titulos_cliente.empty:
             obs_padrao = _join_unique(titulos_cliente["observacao_atual"], limite=1)
 
-        with st.form("form_salvar_tudo_cliente"):
-            st.caption("Atualize os dados da carteira, registre a ação e, se necessário, agende o próximo retorno. Um único botão salva tudo.")
+        # Cada cliente precisa ter chaves próprias nos campos.
+        # Sem isso, o Streamlit reaproveita o texto digitado do cliente anterior.
+        widget_cliente_key = re.sub(r"[^A-Za-z0-9_]+", "_", f"{cliente_codigo}_{loja}_{nome_cliente}")[:80]
+
+        with st.form(f"form_salvar_tudo_cliente_{widget_cliente_key}"):
             cmeta1, cmeta2 = st.columns(2)
-            tipo_cliente = cmeta1.selectbox("Tipo de cliente", ["Não especial", "Especial"], index=0 if tipo_atual != "Especial" else 1)
-            cobrador = cmeta2.text_input("Responsável pela cobrança", value=cobrador_atual, placeholder="Ex.: Cobrança Especial / Cobrança Padrão / nome")
+            tipo_cliente = cmeta1.selectbox(
+                "Tipo de cliente",
+                ["Não especial", "Especial"],
+                index=0 if tipo_atual != "Especial" else 1,
+                key=f"tipo_cliente_{widget_cliente_key}",
+            )
+            cobrador = cmeta2.text_input(
+                "Responsável pela cobrança",
+                value=cobrador_atual,
+                placeholder="Ex.: Cobrança Especial / Cobrança Padrão / nome",
+                key=f"cobrador_{widget_cliente_key}",
+            )
 
             r1, r2 = st.columns(2)
-            vendedor = r1.text_input("Vendedor", value=vendedor_padrao)
-            gerente = r2.text_input("Gerente", value=gerente_padrao)
-            obs_atual = st.text_area("Observação atual do cliente", value=obs_padrao, height=80)
+            vendedor = r1.text_input("Vendedor", value=vendedor_padrao, key=f"vendedor_{widget_cliente_key}")
+            gerente = r2.text_input("Gerente", value=gerente_padrao, key=f"gerente_{widget_cliente_key}")
+            obs_atual = st.text_area("Observação atual do cliente", value=obs_padrao, height=80, key=f"obs_cliente_{widget_cliente_key}")
 
             st.markdown("##### Ação e agenda")
             a1, a2, a3 = st.columns([1.3, 1, 1])
             opcoes_acao = ["Não registrar ação agora"] + ACTION_OPTIONS
-            tipo = a1.selectbox("Ação realizada", opcoes_acao, index=0)
-            responsavel = a2.text_input("Responsável pela ação", value=(cobrador_atual or "Financeiro"))
-            data_acao = a3.date_input("Data da ação", value=data_ref, format="DD/MM/YYYY")
+            tipo = a1.selectbox("Ação realizada", opcoes_acao, index=0, key=f"tipo_acao_{widget_cliente_key}")
+            responsavel = a2.text_input("Responsável pela ação", value=(cobrador_atual or "Financeiro"), key=f"responsavel_acao_{widget_cliente_key}")
+            data_acao = a3.date_input("Data da ação", value=data_ref, format="DD/MM/YYYY", key=f"data_acao_{widget_cliente_key}")
 
             promessa = None
             p1, p2 = st.columns(2)
             if tipo == "Promessa de pagamento":
-                promessa = p1.date_input("Data prometida para pagamento", value=data_ref, format="DD/MM/YYYY")
+                promessa = p1.date_input("Data prometida para pagamento", value=data_ref, format="DD/MM/YYYY", key=f"promessa_{widget_cliente_key}")
 
-            agendar_retorno = p2.checkbox("Agendar nova cobrança/retorno", value=tipo in ["Cliente solicitou retorno", "Agendar retorno"])
+            agendar_retorno = p2.checkbox(
+                "Agendar nova cobrança/retorno",
+                value=tipo in ["Cliente solicitou retorno", "Agendar retorno"],
+                key=f"agendar_retorno_{widget_cliente_key}",
+            )
             ag1, ag2 = st.columns([1, 2])
-            retorno = ag1.date_input("Data do próximo contato", value=data_ref, format="DD/MM/YYYY", disabled=not agendar_retorno)
-            motivo_retorno = ag2.text_input("Motivo do retorno", value="Cobrar novamente", disabled=not agendar_retorno)
+            retorno = ag1.date_input("Data do próximo contato", value=data_ref, format="DD/MM/YYYY", key=f"retorno_{widget_cliente_key}")
+            motivo_retorno = ag2.text_input("Motivo do retorno", value="Cobrar novamente", key=f"motivo_retorno_{widget_cliente_key}")
 
-            observacao = st.text_area("Observação da ação", height=100, placeholder="Ex.: cliente informou que pagará após liberação interna...")
+            observacao = st.text_area(
+                "Observação da ação",
+                height=100,
+                placeholder="Ex.: cliente informou que pagará após liberação interna...",
+                key=f"obs_acao_{widget_cliente_key}",
+            )
             salvar_tudo = st.form_submit_button("Salvar todas as alterações", type="primary", use_container_width=True)
 
             if salvar_tudo:
