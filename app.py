@@ -36,7 +36,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v3.6"
+APP_VERSION = "v3.7"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -440,6 +440,16 @@ def init_db() -> None:
         """
     )
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS config (
+            chave TEXT PRIMARY KEY,
+            valor TEXT DEFAULT '',
+            updated_at TEXT
+        )
+        """
+    )
+
     def ensure_column(table: str, column: str, definition: str) -> None:
         cols = [r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()]
         if column not in cols:
@@ -447,6 +457,12 @@ def init_db() -> None:
 
     ensure_column("clientes", "tipo_cliente", "TEXT DEFAULT 'Não especial'")
     ensure_column("clientes", "cobrador", "TEXT DEFAULT ''")
+    ensure_column("clientes", "razao_social", "TEXT DEFAULT ''")
+    ensure_column("clientes", "cnpj", "TEXT DEFAULT ''")
+    ensure_column("clientes", "contato", "TEXT DEFAULT ''")
+    ensure_column("titulos", "razao_social", "TEXT DEFAULT ''")
+    ensure_column("titulos", "cnpj", "TEXT DEFAULT ''")
+    ensure_column("titulos", "contato", "TEXT DEFAULT ''")
 
     cur.execute("SELECT COUNT(*) AS total FROM regua_cobranca")
     if cur.fetchone()["total"] == 0:
@@ -680,6 +696,142 @@ def read_github_base(raw_url: str) -> pd.DataFrame:
 
 
 
+
+
+
+def get_config(chave: str, default: str = "") -> str:
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT valor FROM config WHERE chave = ?", (chave,)).fetchone()
+        return str(row["valor"] or "") if row else default
+    finally:
+        conn.close()
+
+
+def set_config(chave: str, valor: str) -> None:
+    conn = get_conn()
+    try:
+        now = datetime.now().isoformat(timespec="seconds")
+        conn.execute(
+            """
+            INSERT INTO config (chave, valor, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(chave) DO UPDATE SET valor = excluded.valor, updated_at = excluded.updated_at
+            """,
+            (chave, str(valor or "").strip(), now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def read_excel_any(file_or_bytes) -> pd.DataFrame:
+    file_bytes = file_or_bytes.read() if hasattr(file_or_bytes, "read") else bytes(file_or_bytes)
+    try:
+        df = pd.read_excel(BytesIO(file_bytes))
+    except Exception:
+        try:
+            df = pd.read_csv(BytesIO(file_bytes), sep=None, engine="python")
+        except Exception:
+            df = _xlsx_fallback_to_dataframe(file_bytes)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df.dropna(how="all")
+
+
+def normalize_col_key(value) -> str:
+    txt = normalize_text(value).lower()
+    txt = re.sub(r"[áàãâä]", "a", txt)
+    txt = re.sub(r"[éèêë]", "e", txt)
+    txt = re.sub(r"[íìîï]", "i", txt)
+    txt = re.sub(r"[óòõôö]", "o", txt)
+    txt = re.sub(r"[úùûü]", "u", txt)
+    txt = re.sub(r"ç", "c", txt)
+    return re.sub(r"[^a-z0-9]+", "", txt)
+
+
+def find_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
+    lookup = {normalize_col_key(c): c for c in df.columns}
+    for cand in candidates:
+        key = normalize_col_key(cand)
+        if key in lookup:
+            return lookup[key]
+    # busca aproximada: o candidato contido no nome da coluna
+    for cand in candidates:
+        key = normalize_col_key(cand)
+        for col_key, col in lookup.items():
+            if key and (key in col_key or col_key in key):
+                return col
+    return None
+
+
+def _digits(value) -> str:
+    return re.sub(r"\D+", "", normalize_text(value))
+
+
+def build_faturamento_maps(df_base: pd.DataFrame) -> tuple[dict, dict, dict]:
+    """Cria mapas de cliente a partir da base fixa de faturamento.
+
+    A leitura é flexível para aceitar planilhas com nomes de colunas diferentes.
+    Chaves usadas: cliente+loja, cliente, CNPJ ou nome do cliente.
+    """
+    if df_base.empty:
+        return {}, {}, {}
+    col_cliente = find_col(df_base, ["Cliente", "Cod Cliente", "Código Cliente", "Cod. Cliente", "A1_COD", "Codigo"])
+    col_loja = find_col(df_base, ["Loja", "A1_LOJA"])
+    col_nome = find_col(df_base, ["Nome Cliente", "Cliente Nome", "Nome", "Nome Fantasia", "A1_NOME"])
+    col_razao = find_col(df_base, ["Razão Social", "Razao Social", "Nome Razão", "A1_NREDUZ", "Nome Cliente"])
+    col_cnpj = find_col(df_base, ["CNPJ", "CPF/CNPJ", "CNPJ/CPF", "A1_CGC", "CGC"])
+    col_contato = find_col(df_base, ["Contato", "Responsável", "Responsavel", "Contato Financeiro", "Email", "E-mail", "Telefone"])
+    col_vendedor = find_col(df_base, ["Vendedor", "Nome Vendedor", "Representante", "Consultor", "Comercial"])
+    col_gerente = find_col(df_base, ["Gerente", "Gerente Comercial", "Supervisor", "Coordenador"])
+
+    by_cliente_loja, by_cliente, by_nome = {}, {}, {}
+    for _, r in df_base.iterrows():
+        cliente = normalize_text(r.get(col_cliente, "")) if col_cliente else ""
+        loja = normalize_text(r.get(col_loja, "")) if col_loja else ""
+        nome = normalize_text(r.get(col_nome, "")) if col_nome else ""
+        info = {
+            "vendedor": normalize_text(r.get(col_vendedor, "")) if col_vendedor else "",
+            "gerente": normalize_text(r.get(col_gerente, "")) if col_gerente else "",
+            "razao_social": normalize_text(r.get(col_razao, "")) if col_razao else "",
+            "cnpj": normalize_text(r.get(col_cnpj, "")) if col_cnpj else "",
+            "contato": normalize_text(r.get(col_contato, "")) if col_contato else "",
+        }
+        if not any(info.values()):
+            continue
+        if cliente and loja:
+            by_cliente_loja[f"{cliente}|{loja}".upper()] = info
+        if cliente and cliente.upper() not in by_cliente:
+            by_cliente[cliente.upper()] = info
+        if nome:
+            by_nome[normalize_col_key(nome)] = info
+        cnpj = _digits(info.get("cnpj"))
+        if cnpj:
+            by_nome[f"CNPJ:{cnpj}"] = info
+    return by_cliente_loja, by_cliente, by_nome
+
+
+def get_faturamento_info_for(row, maps: tuple[dict, dict, dict]) -> dict:
+    by_cliente_loja, by_cliente, by_nome = maps
+    cliente = normalize_text(row.get("Cliente"))
+    loja = normalize_text(row.get("Loja"))
+    nome = normalize_text(row.get("Nome Cliente"))
+    return (
+        by_cliente_loja.get(f"{cliente}|{loja}".upper())
+        or by_cliente.get(cliente.upper())
+        or by_nome.get(normalize_col_key(nome))
+        or {}
+    )
+
+
+def load_faturamento_maps_from_github() -> tuple[tuple[dict, dict, dict], str]:
+    url = get_config("base_faturamento_github", "")
+    if not url.strip():
+        return ({}, {}, {}), ""
+    with urlopen(url.strip(), timeout=35) as response:
+        data = response.read()
+    df_base = read_excel_any(data)
+    return build_faturamento_maps(df_base), f"{len(df_base)} linha(s) lida(s)"
 
 def normalize_note_key(value) -> str:
     """Normaliza o número do título/nota para permitir casamento entre relatórios diferentes."""
@@ -965,6 +1117,10 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
         data_ref_str = data_ref.isoformat()
         current_ids = set(df["titulo_id"].astype(str).tolist())
         cadastro_map = get_cliente_cadastro_map(conn)
+        try:
+            faturamento_maps, faturamento_status = load_faturamento_maps_from_github()
+        except Exception as exc:
+            faturamento_maps, faturamento_status = ({}, {}, {}), f"Erro ao ler base de faturamento: {exc}"
 
         existing = pd.read_sql_query("SELECT titulo_id, status, primeira_aparicao, ultima_aparicao FROM titulos", conn)
         existing_ids = set(existing["titulo_id"].astype(str).tolist()) if not existing.empty else set()
@@ -980,25 +1136,32 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
             nome_cliente = normalize_text(row.get("Nome Cliente"))
             cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
             cad = cadastro_map.get(cid, {})
-            vendedor_cad = str(cad.get("vendedor", "") or "")
-            gerente_cad = str(cad.get("gerente", "") or "")
+            auto_info = get_faturamento_info_for(row, faturamento_maps)
+            vendedor_cad = str(cad.get("vendedor", "") or auto_info.get("vendedor", "") or "")
+            gerente_cad = str(cad.get("gerente", "") or auto_info.get("gerente", "") or "")
             obs_cad = str(cad.get("observacao", "") or "")
-            upsert_cliente_cadastro(conn, cliente_codigo, loja, nome_cliente)
+            razao_cad = str(cad.get("razao_social", "") or auto_info.get("razao_social", "") or "")
+            cnpj_cad = str(cad.get("cnpj", "") or auto_info.get("cnpj", "") or "")
+            contato_cad = str(cad.get("contato", "") or auto_info.get("contato", "") or "")
+            upsert_cliente_cadastro(conn, cliente_codigo, loja, nome_cliente, vendedor=vendedor_cad, gerente=gerente_cad, razao_social=razao_cad, cnpj=cnpj_cad, contato=contato_cad)
 
             if tid in existing_ids:
-                cur.execute("SELECT primeira_aparicao, vendedor, gerente, observacao_atual FROM titulos WHERE titulo_id = ?", (tid,))
+                cur.execute("SELECT primeira_aparicao, vendedor, gerente, observacao_atual, razao_social, cnpj, contato FROM titulos WHERE titulo_id = ?", (tid,))
                 old_row = cur.fetchone()
                 first = old_row["primeira_aparicao"]
                 ciclo = calcular_ciclo(first, data_ref)
                 vendedor_final = vendedor_cad or str(old_row["vendedor"] or "")
                 gerente_final = gerente_cad or str(old_row["gerente"] or "")
                 obs_final = obs_cad or str(old_row["observacao_atual"] or "")
+                razao_final = razao_cad or str(old_row["razao_social"] or "")
+                cnpj_final = cnpj_cad or str(old_row["cnpj"] or "")
+                contato_final = contato_cad or str(old_row["contato"] or "")
                 cur.execute(
                     """
                     UPDATE titulos
                        SET filial = ?, prefixo = ?, numero_titulo = ?, parcela = ?, tipo = ?,
                            cliente_codigo = ?, loja = ?, nome_cliente = ?, dt_emissao = ?, vencimento = ?,
-                           valor_titulo = ?, saldo_atual = ?, multa = ?, juros = ?, vendedor = ?, gerente = ?, observacao_atual = ?,
+                           valor_titulo = ?, saldo_atual = ?, multa = ?, juros = ?, vendedor = ?, gerente = ?, observacao_atual = ?, razao_social = ?, cnpj = ?, contato = ?,
                            status = CASE WHEN status = 'Pago' THEN 'Em cobrança' ELSE status END,
                            ultima_aparicao = ?, data_baixa = NULL, ciclo_cobranca = ?, updated_at = ?
                      WHERE titulo_id = ?
@@ -1008,7 +1171,7 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
                         normalize_text(row.get("Parcela")), normalize_text(row.get("Tipo")), cliente_codigo, loja,
                         nome_cliente, row.get("dt_emissao_str"), row.get("vencimento_str"),
                         float(row.get("Vlr.Titulo", 0)), float(row.get("Saldo a receber", 0)), float(row.get("Multa", 0)), float(row.get("Juros", 0)),
-                        vendedor_final, gerente_final, obs_final,
+                        vendedor_final, gerente_final, obs_final, razao_final, cnpj_final, contato_final,
                         data_ref_str, ciclo, now, tid,
                     ),
                 )
@@ -1019,15 +1182,15 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
                     INSERT INTO titulos (
                         titulo_id, filial, prefixo, numero_titulo, parcela, tipo, cliente_codigo, loja,
                         nome_cliente, dt_emissao, vencimento, valor_titulo, saldo_original, saldo_atual,
-                        multa, juros, vendedor, gerente, observacao_atual, status, primeira_aparicao, ultima_aparicao, ciclo_cobranca, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        multa, juros, vendedor, gerente, observacao_atual, razao_social, cnpj, contato, status, primeira_aparicao, ultima_aparicao, ciclo_cobranca, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         tid, normalize_text(row.get("Filial")), normalize_text(row.get("Prefixo")), normalize_text(row.get("No. Titulo")),
                         normalize_text(row.get("Parcela")), normalize_text(row.get("Tipo")), cliente_codigo, loja,
                         nome_cliente, row.get("dt_emissao_str"), row.get("vencimento_str"),
                         float(row.get("Vlr.Titulo", 0)), float(row.get("Saldo a receber", 0)), float(row.get("Saldo a receber", 0)),
-                        float(row.get("Multa", 0)), float(row.get("Juros", 0)), vendedor_cad, gerente_cad, obs_cad, STATUS_ATIVO, data_ref_str, data_ref_str, 1, now, now,
+                        float(row.get("Multa", 0)), float(row.get("Juros", 0)), vendedor_cad, gerente_cad, obs_cad, razao_cad, cnpj_cad, contato_cad, STATUS_ATIVO, data_ref_str, data_ref_str, 1, now, now,
                     ),
                 )
                 cur.execute(
@@ -1204,13 +1367,13 @@ def load_clientes() -> pd.DataFrame:
     return df
 
 
-def upsert_cliente_cadastro(conn: sqlite3.Connection, cliente_codigo: str, loja: str, nome_cliente: str, vendedor: str = "", gerente: str = "", observacao: str = "", tipo_cliente: str = "", cobrador: str = "") -> None:
+def upsert_cliente_cadastro(conn: sqlite3.Connection, cliente_codigo: str, loja: str, nome_cliente: str, vendedor: str = "", gerente: str = "", observacao: str = "", tipo_cliente: str = "", cobrador: str = "", razao_social: str = "", cnpj: str = "", contato: str = "") -> None:
     now = datetime.now().isoformat(timespec="seconds")
     cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
     conn.execute(
         """
-        INSERT INTO clientes (cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente, tipo_cliente, cobrador, observacao, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO clientes (cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente, tipo_cliente, cobrador, observacao, razao_social, cnpj, contato, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(cliente_id) DO UPDATE SET
             nome_cliente = excluded.nome_cliente,
             vendedor = CASE WHEN excluded.vendedor != '' THEN excluded.vendedor ELSE clientes.vendedor END,
@@ -1218,14 +1381,17 @@ def upsert_cliente_cadastro(conn: sqlite3.Connection, cliente_codigo: str, loja:
             tipo_cliente = CASE WHEN excluded.tipo_cliente != '' THEN excluded.tipo_cliente ELSE COALESCE(NULLIF(clientes.tipo_cliente, ''), 'Não especial') END,
             cobrador = CASE WHEN excluded.cobrador != '' THEN excluded.cobrador ELSE COALESCE(clientes.cobrador, '') END,
             observacao = CASE WHEN excluded.observacao != '' THEN excluded.observacao ELSE clientes.observacao END,
+            razao_social = CASE WHEN excluded.razao_social != '' THEN excluded.razao_social ELSE COALESCE(clientes.razao_social, '') END,
+            cnpj = CASE WHEN excluded.cnpj != '' THEN excluded.cnpj ELSE COALESCE(clientes.cnpj, '') END,
+            contato = CASE WHEN excluded.contato != '' THEN excluded.contato ELSE COALESCE(clientes.contato, '') END,
             updated_at = excluded.updated_at
         """,
-        (cid, cliente_codigo, loja, nome_cliente, vendedor.strip(), gerente.strip(), (tipo_cliente or "").strip(), cobrador.strip(), observacao.strip(), now, now),
+        (cid, cliente_codigo, loja, nome_cliente, vendedor.strip(), gerente.strip(), (tipo_cliente or "").strip(), cobrador.strip(), observacao.strip(), razao_social.strip(), cnpj.strip(), contato.strip(), now, now),
     )
 
 
 def get_cliente_cadastro_map(conn: sqlite3.Connection) -> Dict[str, Dict[str, str]]:
-    df = pd.read_sql_query("SELECT cliente_id, vendedor, gerente, observacao, tipo_cliente, cobrador FROM clientes", conn)
+    df = pd.read_sql_query("SELECT cliente_id, vendedor, gerente, observacao, tipo_cliente, cobrador, razao_social, cnpj, contato FROM clientes", conn)
     if df.empty:
         return {}
     return df.set_index("cliente_id").to_dict(orient="index")
@@ -1278,7 +1444,7 @@ def update_cliente_fields(cliente_codigo: str, loja: str, nome_cliente: str, ven
     try:
         where, params = _cliente_where_clause(cliente_codigo, loja, nome_cliente)
         now = datetime.now().isoformat(timespec="seconds")
-        upsert_cliente_cadastro(conn, cliente_codigo, loja, nome_cliente, vendedor, gerente, observacao)
+        upsert_cliente_cadastro(conn, cliente_codigo, loja, nome_cliente, vendedor=vendedor, gerente=gerente, observacao=observacao)
         cur = conn.execute(
             f"""
             UPDATE titulos
@@ -1330,6 +1496,9 @@ def save_cliente_all(
     nome_cliente: str,
     tipo_cliente: str,
     cobrador: str,
+    razao_social: str,
+    cnpj: str,
+    contato: str,
     vendedor: str,
     gerente: str,
     observacao_cliente: str,
@@ -1354,6 +1523,9 @@ def save_cliente_all(
         cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
         tipo_cliente = (tipo_cliente or "Não especial").strip() or "Não especial"
         cobrador = (cobrador or "").strip()
+        razao_social = (razao_social or "").strip()
+        cnpj = (cnpj or "").strip()
+        contato = (contato or "").strip()
         vendedor = (vendedor or "").strip()
         gerente = (gerente or "").strip()
         observacao_cliente = (observacao_cliente or "").strip()
@@ -1363,8 +1535,8 @@ def save_cliente_all(
         # Cadastro do cliente: grava exatamente o que está na tela.
         conn.execute(
             """
-            INSERT INTO clientes (cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente, tipo_cliente, cobrador, observacao, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO clientes (cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente, tipo_cliente, cobrador, observacao, razao_social, cnpj, contato, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(cliente_id) DO UPDATE SET
                 cliente_codigo = excluded.cliente_codigo,
                 loja = excluded.loja,
@@ -1374,9 +1546,12 @@ def save_cliente_all(
                 tipo_cliente = excluded.tipo_cliente,
                 cobrador = excluded.cobrador,
                 observacao = excluded.observacao,
+                razao_social = excluded.razao_social,
+                cnpj = excluded.cnpj,
+                contato = excluded.contato,
                 updated_at = excluded.updated_at
             """,
-            (cid, cliente_codigo, loja, nome_cliente, vendedor, gerente, tipo_cliente, cobrador, observacao_cliente, now, now),
+            (cid, cliente_codigo, loja, nome_cliente, vendedor, gerente, tipo_cliente, cobrador, observacao_cliente, razao_social, cnpj, contato, now, now),
         )
 
         where, params = _cliente_where_clause(cliente_codigo, loja, nome_cliente)
@@ -1386,7 +1561,7 @@ def save_cliente_all(
                SET vendedor = ?, gerente = ?, observacao_atual = ?, updated_at = ?
              WHERE {where} AND status != ?
             """,
-            [vendedor, gerente, observacao_cliente, now] + params + [STATUS_PAGO],
+            [vendedor, gerente, observacao_cliente, razao_social, cnpj, contato, now] + params + [STATUS_PAGO],
         )
         titulos_atualizados = int(cur.rowcount or 0)
 
@@ -1611,6 +1786,9 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
         cad = cad_map.get(cid, {})
         tipo_cliente = str(cad.get("tipo_cliente", "") or "Não especial")
         cobrador = str(cad.get("cobrador", "") or "")
+        razao_social = str(cad.get("razao_social", "") or "")
+        cnpj = str(cad.get("cnpj", "") or "")
+        contato = str(cad.get("contato", "") or "")
         acao = get_action_for_day(max_ciclo, str(grp["status"].iloc[0]), promessa_cliente, ref)
         rows.append({
             "cliente_id": f"{cliente_codigo}|{loja}|{nome_cliente}",
@@ -1630,6 +1808,9 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
             "gerente": _join_unique(grp["gerente"]),
             "tipo_cliente": tipo_cliente,
             "cobrador": cobrador,
+            "razao_social": razao_social,
+            "cnpj": cnpj,
+            "contato": contato,
             "valor_prioridade": float(grp["saldo_atual"].sum()) * (max_dias + 1),
         })
     out = pd.DataFrame(rows)
@@ -1753,6 +1934,21 @@ if page == "Upload diário":
 
     df_upload = None
     fonte_arquivo = None
+    with st.expander("Base fixa de faturamento para localizar vendedor/gerente", expanded=False):
+        url_atual = get_config("base_faturamento_github", "")
+        url_nova = st.text_input("URL raw da base de faturamento no GitHub", value=url_atual, placeholder="Cole aqui o link raw do XLSX/CSV")
+        cgit1, cgit2 = st.columns(2)
+        if cgit1.button("Salvar base fixa", use_container_width=True):
+            set_config("base_faturamento_github", url_nova)
+            st.success("Base de faturamento salva. Ela será usada nos próximos uploads para sugerir vendedor, gerente e dados cadastrais.")
+        if cgit2.button("Testar leitura", use_container_width=True, disabled=not bool(url_nova.strip())):
+            try:
+                set_config("base_faturamento_github", url_nova)
+                _, status_base = load_faturamento_maps_from_github()
+                st.success(f"Base lida com sucesso: {status_base}.")
+            except Exception as exc:
+                st.error(f"Não consegui ler a base: {exc}")
+
     uploaded = st.file_uploader("Relatório: Títulos a receber vencidos", type=["xlsx", "xls"])
     if uploaded:
         try:
@@ -2043,6 +2239,9 @@ elif page == "Cliente":
         st.markdown("#### Alterações do cliente")
         tipo_atual = str(selected.get("tipo_cliente", "Não especial") or "Não especial")
         cobrador_atual = str(selected.get("cobrador", "") or "")
+        razao_padrao = str(selected.get("razao_social", "") or "")
+        cnpj_padrao = str(selected.get("cnpj", "") or "")
+        contato_padrao = str(selected.get("contato", "") or "")
         vendedor_padrao = str(selected["vendedor"] or "")
         gerente_padrao = str(selected["gerente"] or "")
         obs_padrao = ""
@@ -2067,6 +2266,11 @@ elif page == "Cliente":
                 placeholder="Ex.: Cobrança Especial / Cobrança Padrão / nome",
                 key=f"cobrador_{widget_cliente_key}",
             )
+
+            cad1, cad2 = st.columns(2)
+            razao_social = cad1.text_input("Razão social", value=razao_padrao, key=f"razao_social_{widget_cliente_key}")
+            cnpj = cad2.text_input("CNPJ", value=cnpj_padrao, key=f"cnpj_{widget_cliente_key}")
+            contato = st.text_input("Contato do cliente", value=contato_padrao, placeholder="Nome, telefone ou e-mail do contato financeiro", key=f"contato_{widget_cliente_key}")
 
             r1, r2 = st.columns(2)
             vendedor = r1.text_input("Vendedor", value=vendedor_padrao, key=f"vendedor_{widget_cliente_key}")
@@ -2109,6 +2313,9 @@ elif page == "Cliente":
                     nome_cliente=nome_cliente,
                     tipo_cliente=tipo_cliente,
                     cobrador=cobrador,
+                    razao_social=razao_social,
+                    cnpj=cnpj,
+                    contato=contato,
                     vendedor=vendedor,
                     gerente=gerente,
                     observacao_cliente=obs_atual,
@@ -2177,7 +2384,10 @@ elif page == "Cliente":
         if not rel_tit.empty:
             rel_tit["tipo_cliente"] = str(selected.get("tipo_cliente", "Não especial") or "Não especial")
             rel_tit["cobrador"] = str(selected.get("cobrador", "") or "")
-            rel_tit = rel_tit[["nome_cliente", "tipo_cliente", "cobrador", "numero_titulo", "parcela", "tipo", "vencimento", "valor_titulo", "saldo_atual", "status", "vendedor", "gerente", "primeira_aparicao", "ultima_aparicao", "data_baixa", "observacao_atual"]]
+            rel_tit["razao_social"] = str(selected.get("razao_social", "") or "")
+            rel_tit["cnpj"] = str(selected.get("cnpj", "") or "")
+            rel_tit["contato"] = str(selected.get("contato", "") or "")
+            rel_tit = rel_tit[["nome_cliente", "razao_social", "cnpj", "contato", "tipo_cliente", "cobrador", "numero_titulo", "parcela", "tipo", "vencimento", "valor_titulo", "saldo_atual", "status", "vendedor", "gerente", "primeira_aparicao", "ultima_aparicao", "data_baixa", "observacao_atual"]]
         rel_hist = hist_export.copy()
         if not rel_hist.empty:
             rel_hist = rel_hist.merge(all_titulos_cliente[["titulo_id", "numero_titulo", "parcela", "nome_cliente"]], on="titulo_id", how="left")
@@ -2386,7 +2596,7 @@ elif page == "Relatórios":
 
         detalhes = rel[[
             "nome_cliente", "saldo_total", "qtd_titulos", "maior_dias_atraso", "faixa_atraso",
-            "acao_do_dia", "vendedor", "gerente", "tipo_cliente", "cobrador", "menor_vencimento"
+            "acao_do_dia", "vendedor", "gerente", "tipo_cliente", "cobrador", "razao_social", "cnpj", "contato", "menor_vencimento"
         ]].copy() if not rel.empty else pd.DataFrame()
         if not detalhes.empty:
             detalhes_export = detalhes.copy()
@@ -2394,7 +2604,7 @@ elif page == "Relatórios":
             detalhes_export = detalhes_export.rename(columns={
                 "nome_cliente": "Cliente", "saldo_total": "Valor em aberto", "qtd_titulos": "Títulos",
                 "maior_dias_atraso": "Maior atraso", "faixa_atraso": "Faixa de atraso", "acao_do_dia": "Ação do dia",
-                "vendedor": "Vendedor", "gerente": "Gerente", "tipo_cliente": "Tipo de cliente", "cobrador": "Cobrador",
+                "vendedor": "Vendedor", "gerente": "Gerente", "tipo_cliente": "Tipo de cliente", "cobrador": "Cobrador", "razao_social": "Razão social", "cnpj": "CNPJ", "contato": "Contato",
                 "menor_vencimento": "Menor vencimento"
             })
         else:
