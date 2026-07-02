@@ -1205,7 +1205,7 @@ def load_clientes() -> pd.DataFrame:
     return df
 
 
-def upsert_cliente_cadastro(conn: sqlite3.Connection, cliente_codigo: str, loja: str, nome_cliente: str, vendedor: str = "", gerente: str = "", observacao: str = "", tipo_cliente: str = "Não especial", cobrador: str = "") -> None:
+def upsert_cliente_cadastro(conn: sqlite3.Connection, cliente_codigo: str, loja: str, nome_cliente: str, vendedor: str = "", gerente: str = "", observacao: str = "", tipo_cliente: str = "", cobrador: str = "") -> None:
     now = datetime.now().isoformat(timespec="seconds")
     cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
     conn.execute(
@@ -1216,12 +1216,12 @@ def upsert_cliente_cadastro(conn: sqlite3.Connection, cliente_codigo: str, loja:
             nome_cliente = excluded.nome_cliente,
             vendedor = CASE WHEN excluded.vendedor != '' THEN excluded.vendedor ELSE clientes.vendedor END,
             gerente = CASE WHEN excluded.gerente != '' THEN excluded.gerente ELSE clientes.gerente END,
-            tipo_cliente = CASE WHEN excluded.tipo_cliente != '' THEN excluded.tipo_cliente ELSE COALESCE(clientes.tipo_cliente, 'Não especial') END,
+            tipo_cliente = CASE WHEN excluded.tipo_cliente != '' THEN excluded.tipo_cliente ELSE COALESCE(NULLIF(clientes.tipo_cliente, ''), 'Não especial') END,
             cobrador = CASE WHEN excluded.cobrador != '' THEN excluded.cobrador ELSE COALESCE(clientes.cobrador, '') END,
             observacao = CASE WHEN excluded.observacao != '' THEN excluded.observacao ELSE clientes.observacao END,
             updated_at = excluded.updated_at
         """,
-        (cid, cliente_codigo, loja, nome_cliente, vendedor.strip(), gerente.strip(), tipo_cliente.strip() or "Não especial", cobrador.strip(), observacao.strip(), now, now),
+        (cid, cliente_codigo, loja, nome_cliente, vendedor.strip(), gerente.strip(), (tipo_cliente or "").strip(), cobrador.strip(), observacao.strip(), now, now),
     )
 
 
@@ -1323,6 +1323,151 @@ def add_action(titulo_id: str, data_acao: date, tipo: str, responsavel: str, obs
 
 
 
+
+
+def save_cliente_all(
+    cliente_codigo: str,
+    loja: str,
+    nome_cliente: str,
+    tipo_cliente: str,
+    cobrador: str,
+    vendedor: str,
+    gerente: str,
+    observacao_cliente: str,
+    tipo_acao: str,
+    responsavel_acao: str,
+    data_acao: date,
+    observacao_acao: str,
+    promessa: Optional[date],
+    agendar_retorno: bool,
+    data_retorno: Optional[date],
+    motivo_retorno: str,
+) -> Dict[str, object]:
+    """Salva todos os campos do cliente em uma única transação.
+
+    Evita que um campo salvo por último sobrescreva outro campo com valor antigo.
+    Também garante que o histórico, a promessa e a agenda sejam gravados juntos ou nada seja salvo.
+    """
+    backup_db("antes_salvar_cliente_completo")
+    conn = get_conn()
+    try:
+        now = datetime.now().isoformat(timespec="seconds")
+        cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
+        tipo_cliente = (tipo_cliente or "Não especial").strip() or "Não especial"
+        cobrador = (cobrador or "").strip()
+        vendedor = (vendedor or "").strip()
+        gerente = (gerente or "").strip()
+        observacao_cliente = (observacao_cliente or "").strip()
+        responsavel_acao = (responsavel_acao or cobrador or "Financeiro").strip()
+        observacao_acao = clean_history_text(observacao_acao or "")
+
+        # Cadastro do cliente: grava exatamente o que está na tela.
+        conn.execute(
+            """
+            INSERT INTO clientes (cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente, tipo_cliente, cobrador, observacao, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cliente_id) DO UPDATE SET
+                cliente_codigo = excluded.cliente_codigo,
+                loja = excluded.loja,
+                nome_cliente = excluded.nome_cliente,
+                vendedor = excluded.vendedor,
+                gerente = excluded.gerente,
+                tipo_cliente = excluded.tipo_cliente,
+                cobrador = excluded.cobrador,
+                observacao = excluded.observacao,
+                updated_at = excluded.updated_at
+            """,
+            (cid, cliente_codigo, loja, nome_cliente, vendedor, gerente, tipo_cliente, cobrador, observacao_cliente, now, now),
+        )
+
+        where, params = _cliente_where_clause(cliente_codigo, loja, nome_cliente)
+        cur = conn.execute(
+            f"""
+            UPDATE titulos
+               SET vendedor = ?, gerente = ?, observacao_atual = ?, updated_at = ?
+             WHERE {where} AND status != ?
+            """,
+            [vendedor, gerente, observacao_cliente, now] + params + [STATUS_PAGO],
+        )
+        titulos_atualizados = int(cur.rowcount or 0)
+
+        total_acao = 0
+        promessa_str = promessa.isoformat() if promessa else None
+        if tipo_acao and tipo_acao != "Não registrar ação agora":
+            titulos = pd.read_sql_query(
+                f"SELECT titulo_id FROM titulos WHERE {where} AND status != ?",
+                conn,
+                params=params + [STATUS_PAGO],
+            )
+            ids = titulos["titulo_id"].astype(str).tolist() if not titulos.empty else []
+            if ids:
+                rows = [
+                    (tid, data_acao.isoformat(), tipo_acao, responsavel_acao, observacao_acao, promessa_str, now)
+                    for tid in ids
+                ]
+                conn.executemany(
+                    """
+                    INSERT INTO historico_acoes (titulo_id, data_acao, tipo_acao, responsavel, observacao, promessa_pagamento, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+                total_acao = len(rows)
+
+                if promessa_str:
+                    conn.execute(
+                        f"UPDATE titulos SET promessa_pagamento = ?, status = ?, updated_at = ? WHERE {where} AND status != ?",
+                        [promessa_str, STATUS_PROMESSA, now] + params + [STATUS_PAGO],
+                    )
+                elif tipo_acao == "Pagamento identificado manualmente":
+                    conn.execute(
+                        f"UPDATE titulos SET status = ?, data_baixa = ?, updated_at = ? WHERE {where} AND status != ?",
+                        [STATUS_PAGO, data_acao.isoformat(), now] + params + [STATUS_PAGO],
+                    )
+
+        agenda_status = "não agendada"
+        if agendar_retorno and data_retorno:
+            data_iso = data_retorno.isoformat()
+            motivo_limpo = clean_history_text(motivo_retorno or observacao_acao or tipo_acao or "Retorno programado")
+            existente = conn.execute(
+                """
+                SELECT id
+                  FROM agenda_retorno
+                 WHERE cliente_id = ?
+                   AND data_retorno = ?
+                   AND status = 'Pendente'
+                 ORDER BY id DESC
+                 LIMIT 1
+                """,
+                (cid, data_iso),
+            ).fetchone()
+            if existente:
+                conn.execute(
+                    """
+                    UPDATE agenda_retorno
+                       SET motivo = ?, responsavel = ?, nome_cliente = ?, cliente_codigo = ?, loja = ?, updated_at = ?
+                     WHERE id = ?
+                    """,
+                    (motivo_limpo, responsavel_acao, nome_cliente, cliente_codigo, loja, now, int(existente[0])),
+                )
+                agenda_status = "atualizada"
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO agenda_retorno (cliente_id, cliente_codigo, loja, nome_cliente, data_retorno, motivo, responsavel, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'Pendente', ?, ?)
+                    """,
+                    (cid, cliente_codigo, loja, nome_cliente, data_iso, motivo_limpo, responsavel_acao, now, now),
+                )
+                agenda_status = "incluída"
+
+        conn.commit()
+        return {"titulos_atualizados": titulos_atualizados, "acoes_registradas": total_acao, "agenda": agenda_status}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def add_action_cliente(cliente_codigo: str, loja: str, nome_cliente: str, data_acao: date, tipo: str, responsavel: str, observacao: str, promessa: Optional[date]) -> int:
     backup_db("antes_acao_cliente")
@@ -1466,7 +1611,7 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
 
         cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
         cad = cad_map.get(cid, {})
-        tipo_cliente = str(cad.get("tipo_cliente", "Não especial") or "Não especial")
+        tipo_cliente = str(cad.get("tipo_cliente", "") or "Não especial")
         cobrador = str(cad.get("cobrador", "") or "")
         acao = get_action_for_day(max_ciclo, str(grp["status"].iloc[0]), promessa_cliente, ref)
         rows.append({
@@ -1938,22 +2083,31 @@ elif page == "Cliente":
             salvar_tudo = st.form_submit_button("Salvar todas as alterações", type="primary", use_container_width=True)
 
             if salvar_tudo:
-                update_cliente_meta(cliente_codigo, loja, nome_cliente, tipo_cliente, cobrador)
-                total_campos = update_cliente_fields(cliente_codigo, loja, nome_cliente, vendedor, gerente, obs_atual)
-                mensagens = [f"Dados do cliente salvos em {total_campos} título(s) aberto(s)."]
-
-                obs_limpa = clean_history_text(observacao)
-                if tipo != "Não registrar ação agora":
-                    total_acao = add_action_cliente(cliente_codigo, loja, nome_cliente, data_acao, tipo, responsavel, obs_limpa, promessa)
-                    mensagens.append(f"Ação registrada para {total_acao} título(s).")
-
-                if agendar_retorno and retorno:
-                    motivo_final = clean_history_text(motivo_retorno or obs_limpa or tipo or "Retorno programado")
-                    status_agenda = add_agenda_retorno(cliente_codigo, loja, nome_cliente, retorno, motivo_final, responsavel or cobrador or "Financeiro")
-                    if status_agenda == "atualizado":
-                        mensagens.append(f"Retorno de {retorno.strftime('%d/%m/%Y')} já existia e foi atualizado, sem duplicar agenda.")
-                    else:
-                        mensagens.append(f"Retorno agendado para {retorno.strftime('%d/%m/%Y')}.")
+                resultado = save_cliente_all(
+                    cliente_codigo=cliente_codigo,
+                    loja=loja,
+                    nome_cliente=nome_cliente,
+                    tipo_cliente=tipo_cliente,
+                    cobrador=cobrador,
+                    vendedor=vendedor,
+                    gerente=gerente,
+                    observacao_cliente=obs_atual,
+                    tipo_acao=tipo,
+                    responsavel_acao=responsavel,
+                    data_acao=data_acao,
+                    observacao_acao=observacao,
+                    promessa=promessa,
+                    agendar_retorno=bool(agendar_retorno),
+                    data_retorno=retorno if agendar_retorno else None,
+                    motivo_retorno=motivo_retorno,
+                )
+                mensagens = [f"Dados salvos em {resultado['titulos_atualizados']} título(s) aberto(s)."]
+                if int(resultado.get("acoes_registradas", 0)):
+                    mensagens.append(f"Ação registrada para {resultado['acoes_registradas']} título(s).")
+                if resultado.get("agenda") == "atualizada":
+                    mensagens.append(f"Agenda de {retorno.strftime('%d/%m/%Y')} atualizada, sem duplicar.")
+                elif resultado.get("agenda") == "incluída":
+                    mensagens.append(f"Retorno agendado para {retorno.strftime('%d/%m/%Y')}.")
 
                 st.success(" ".join(mensagens) + " Cliente mantido na tela.")
                 st.session_state["cliente_index"] = selected_pos
