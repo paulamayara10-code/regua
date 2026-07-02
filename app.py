@@ -36,7 +36,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v2.9"
+APP_VERSION = "v3.0"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -1862,7 +1862,7 @@ elif page == "Cliente":
                 hide_index=True,
             )
 
-        st.markdown("#### Dados da carteira")
+        st.markdown("#### Alterações do cliente")
         tipo_atual = str(selected.get("tipo_cliente", "Não especial") or "Não especial")
         cobrador_atual = str(selected.get("cobrador", "") or "")
         vendedor_padrao = str(selected["vendedor"] or "")
@@ -1871,46 +1871,56 @@ elif page == "Cliente":
         if not titulos_cliente.empty:
             obs_padrao = _join_unique(titulos_cliente["observacao_atual"], limite=1)
 
-        with st.form("form_dados_cliente_unico"):
+        with st.form("form_salvar_tudo_cliente"):
+            st.caption("Atualize os dados da carteira, registre a ação e, se necessário, agende o próximo retorno. Um único botão salva tudo.")
             cmeta1, cmeta2 = st.columns(2)
             tipo_cliente = cmeta1.selectbox("Tipo de cliente", ["Não especial", "Especial"], index=0 if tipo_atual != "Especial" else 1)
             cobrador = cmeta2.text_input("Responsável pela cobrança", value=cobrador_atual, placeholder="Ex.: Cobrança Especial / Cobrança Padrão / nome")
+
             r1, r2 = st.columns(2)
             vendedor = r1.text_input("Vendedor", value=vendedor_padrao)
             gerente = r2.text_input("Gerente", value=gerente_padrao)
-            obs_atual = st.text_area("Observação atual do cliente", value=obs_padrao, height=90)
-            salvar_alteracoes = st.form_submit_button("Salvar alterações do cliente", type="primary", use_container_width=True)
-            if salvar_alteracoes:
-                update_cliente_meta(cliente_codigo, loja, nome_cliente, tipo_cliente, cobrador)
-                total = update_cliente_fields(cliente_codigo, loja, nome_cliente, vendedor, gerente, obs_atual)
-                st.success(f"Alterações salvas com segurança em {total} título(s) aberto(s). O cliente atual será mantido na tela.")
-                st.session_state["cliente_index"] = selected_pos
-                st.rerun()
+            obs_atual = st.text_area("Observação atual do cliente", value=obs_padrao, height=80)
 
-        st.markdown("#### Registrar ação única do cliente")
-        
-        with st.form("form_acao_cliente"):
-            a1, a2, a3 = st.columns([1.2, 1, 1])
-            tipo = a1.selectbox("Ação realizada", ACTION_OPTIONS)
-            responsavel = a2.text_input("Responsável pela ação", value="Financeiro")
+            st.markdown("##### Ação e agenda")
+            a1, a2, a3 = st.columns([1.3, 1, 1])
+            opcoes_acao = ["Não registrar ação agora"] + ACTION_OPTIONS
+            tipo = a1.selectbox("Ação realizada", opcoes_acao, index=0)
+            responsavel = a2.text_input("Responsável pela ação", value=(cobrador_atual or "Financeiro"))
             data_acao = a3.date_input("Data da ação", value=data_ref, format="DD/MM/YYYY")
-            promessa = None
-            if tipo == "Promessa de pagamento":
-                promessa = st.date_input("Data prometida para pagamento", value=data_ref, format="DD/MM/YYYY")
 
-            agendar_retorno = st.checkbox("Agendar nova cobrança/retorno", value=tipo in ["Cliente solicitou retorno", "Agendar retorno"])
+            promessa = None
+            p1, p2 = st.columns(2)
+            if tipo == "Promessa de pagamento":
+                promessa = p1.date_input("Data prometida para pagamento", value=data_ref, format="DD/MM/YYYY")
+
+            agendar_retorno = p2.checkbox("Agendar nova cobrança/retorno", value=tipo in ["Cliente solicitou retorno", "Agendar retorno"])
             retorno = None
+            motivo_retorno = ""
             if agendar_retorno:
-                retorno = st.date_input("Cobrar novamente em", value=data_ref, format="DD/MM/YYYY")
+                ag1, ag2 = st.columns([1, 2])
+                retorno = ag1.date_input("Data do próximo contato", value=data_ref, format="DD/MM/YYYY")
+                motivo_retorno = ag2.text_input("Motivo do retorno", value="Cobrar novamente")
 
             observacao = st.text_area("Observação da ação", height=100, placeholder="Ex.: cliente informou que pagará após liberação interna...")
-            salvar_acao = st.form_submit_button("Registrar no histórico do cliente", type="primary")
-            if salvar_acao:
+            salvar_tudo = st.form_submit_button("Salvar todas as alterações", type="primary", use_container_width=True)
+
+            if salvar_tudo:
+                update_cliente_meta(cliente_codigo, loja, nome_cliente, tipo_cliente, cobrador)
+                total_campos = update_cliente_fields(cliente_codigo, loja, nome_cliente, vendedor, gerente, obs_atual)
+                mensagens = [f"Dados do cliente salvos em {total_campos} título(s) aberto(s)."]
+
                 obs_limpa = clean_history_text(observacao)
-                total = add_action_cliente(cliente_codigo, loja, nome_cliente, data_acao, tipo, responsavel, obs_limpa, promessa)
+                if tipo != "Não registrar ação agora":
+                    total_acao = add_action_cliente(cliente_codigo, loja, nome_cliente, data_acao, tipo, responsavel, obs_limpa, promessa)
+                    mensagens.append(f"Ação registrada para {total_acao} título(s).")
+
                 if retorno:
-                    add_agenda_retorno(cliente_codigo, loja, nome_cliente, retorno, obs_limpa or tipo, responsavel)
-                st.success(f"Ação registrada para {total} título(s) aberto(s) do cliente. Cliente mantido na tela.")
+                    motivo_final = clean_history_text(motivo_retorno or obs_limpa or tipo or "Retorno programado")
+                    add_agenda_retorno(cliente_codigo, loja, nome_cliente, retorno, motivo_final, responsavel or cobrador or "Financeiro")
+                    mensagens.append(f"Retorno agendado para {retorno.strftime('%d/%m/%Y')}.")
+
+                st.success(" ".join(mensagens) + " Cliente mantido na tela.")
                 st.session_state["cliente_index"] = selected_pos
                 st.rerun()
 
