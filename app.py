@@ -35,7 +35,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM Financeiro"
-APP_VERSION = "v2.6 - visual First"
+APP_VERSION = "v2.7"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -176,6 +176,8 @@ st.markdown(
         .stTabs [data-baseweb="tab-list"] {gap: 8px;}
         .stTabs [data-baseweb="tab"] {border-radius: 999px; background: #FFFFFF; border: 1px solid var(--first-border); padding: 8px 16px;}
         .stTabs [aria-selected="true"] {background: #EAF5FF !important; color: #0B2341 !important; font-weight: 850;}
+        .paula-footer {text-align:center; color:#667085; font-size:13px; margin-top:32px; padding:18px 0 4px 0;}
+        .paula-footer strong {color:#0B2341;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -1304,8 +1306,6 @@ st.markdown(
     f"""
     <div class="first-header">
         <h1>{APP_TITLE}</h1>
-        <p>{APP_NAME} • {APP_VERSION}</p>
-        <div class="first-chip">Cobrança por cliente • agenda de retorno • histórico seguro</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -1342,17 +1342,6 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     st.markdown("#### Segurança")
     st.markdown(backup_status_html(), unsafe_allow_html=True)
-    try:
-        pacote_sidebar = export_backup_zip()
-        st.download_button(
-            "Backup agora",
-            pacote_sidebar,
-            file_name=f"crm_financeiro_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-            mime="application/zip",
-            use_container_width=True,
-        )
-    except Exception:
-        st.caption("Backup disponível após iniciar o banco.")
     st.markdown("---")
     if st.button("Limpar filtros", use_container_width=True):
         for k in list(st.session_state.keys()):
@@ -1367,22 +1356,10 @@ if page == "Upload diário":
     st.markdown("### Upload diário do relatório Protheus")
     
 
-    st.markdown("#### 1) Base inicial pelo GitHub, opcional")
-    
-    github_url = st.text_input("URL raw da base no GitHub", placeholder="https://raw.githubusercontent.com/.../Titulos-a-receber-vencidos.xlsx")
-
     df_upload = None
     fonte_arquivo = None
-    if st.button("Carregar base do GitHub", use_container_width=True):
-        try:
-            df_upload = read_github_base(github_url)
-            fonte_arquivo = "GitHub"
-            st.session_state["df_upload_atual"] = df_upload
-            st.session_state["fonte_upload_atual"] = fonte_arquivo
-        except Exception as exc:
-            st.error(f"Não consegui carregar a base do GitHub: {exc}")
 
-    st.markdown("#### 2) Upload manual do relatório do dia")
+    st.markdown("#### Upload manual do relatório do dia")
     uploaded = st.file_uploader("Relatório: Títulos a receber vencidos", type=["xlsx", "xls"])
     if uploaded:
         try:
@@ -1933,7 +1910,6 @@ elif page == "Histórico":
 
 elif page == "Régua":
     st.markdown("### Régua de cobrança")
-    st.caption("Você pode alterar os dias, ações e responsáveis. O sistema sempre usa a maior regra cujo dia seja menor ou igual ao dia atual da cobrança.")
     regua = load_regua()
     edited = st.data_editor(
         regua,
@@ -1985,3 +1961,6 @@ elif page == "Base de títulos":
 
         csv = df.to_csv(index=False, sep=";", encoding="utf-8-sig")
         st.download_button("Baixar base filtrada CSV", csv, file_name="base_crm_cobranca.csv", mime="text/csv")
+
+
+st.markdown('<div class="paula-footer">Desenvolvido por <strong>Paula Verissimo</strong></div>', unsafe_allow_html=True)
