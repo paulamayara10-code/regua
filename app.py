@@ -36,7 +36,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v2.8"
+APP_VERSION = "v2.9"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -510,6 +510,26 @@ def normalize_text(value) -> str:
     return text
 
 
+
+
+def clean_history_text(value) -> str:
+    """Remove ruídos vindos de planilhas antigas de cobrança."""
+    txt = normalize_text(value)
+    if not txt:
+        return ""
+    # Remove marcadores importados por engano de colunas de decisão/status e datas soltas.
+    txt = re.sub(r"\bDecis[aã]o/status:\s*", "", txt, flags=re.IGNORECASE)
+    txt = re.sub(r"\bDecis[aã]o\s*/\s*status\s*[:;-]?\s*", "", txt, flags=re.IGNORECASE)
+    txt = re.sub(r"\b(?:19|20)\d{2}-\d{2}-\d{2}(?:\s+00:00:00)?\b", "", txt)
+    txt = re.sub(r"\b(?:nan|none|nat)\b", "", txt, flags=re.IGNORECASE)
+    # Remove repetições e espaços duplicados.
+    txt = re.sub(r"\s+", " ", txt).strip(" -;|•")
+    # Evita frases vazias após limpeza.
+    if txt.lower() in {"cliente", "status", "decisao", "decisão"}:
+        return ""
+    return txt
+
+
 def make_titulo_id(row: pd.Series) -> str:
     parts = [
         normalize_text(row.get("Filial")),
@@ -728,8 +748,9 @@ def read_legacy_history_upload(file) -> pd.DataFrame:
     if hist_col is None:
         raise ValueError("Não encontrei a coluna HISTÓRICO na planilha.")
 
-    # Colunas sem nome no final costumam carregar status/decisão, ex.: JURIDICO.
-    extra_cols = [c for c in raw.columns if c not in {code_col, prf_col, hist_col}]
+    # Importamos somente a coluna HISTÓRICO.
+    # As demais colunas da planilha antiga costumam trazer datas/status e geravam texto confuso.
+    extra_cols = []
 
     blocks = []
     current = None
@@ -742,7 +763,10 @@ def read_legacy_history_upload(file) -> pd.DataFrame:
         note_keys = sorted(set([k for k in current.get("note_keys", []) if k]))
         if hist_lines and note_keys:
             hist = " ".join(hist_lines)
-            hist = re.sub(r"\s+", " ", hist).strip()
+            hist = clean_history_text(hist)
+            if not hist:
+                current = None
+                return
             blocks.append({
                 "cliente_codigo": current.get("cliente_codigo", ""),
                 "loja": current.get("loja", ""),
@@ -791,7 +815,9 @@ def read_legacy_history_upload(file) -> pd.DataFrame:
             current["note_keys"].append(note_key)
 
         if hist_val:
-            current["hist_lines"].append(hist_val)
+            hist_limpo = clean_history_text(hist_val)
+            if hist_limpo:
+                current["hist_lines"].append(hist_limpo)
 
         for c in extra_cols:
             extra = normalize_text(row.get(c))
@@ -828,7 +854,7 @@ def import_legacy_history(df_legacy: pd.DataFrame, data_ref: date, responsavel: 
         for _, rec in df_legacy.iterrows():
             notas = [n.strip() for n in str(rec.get("notas", "")).split(",") if n.strip()]
             cliente_codigo = normalize_text(rec.get("cliente_codigo"))
-            historico = normalize_text(rec.get("historico_legado"))
+            historico = clean_history_text(rec.get("historico_legado"))
             nome_cliente = normalize_text(rec.get("nome_cliente"))
             if not notas or not historico:
                 continue
@@ -1869,19 +1895,23 @@ elif page == "Cliente":
             responsavel = a2.text_input("Responsável pela ação", value="Financeiro")
             data_acao = a3.date_input("Data da ação", value=data_ref, format="DD/MM/YYYY")
             promessa = None
-            retorno = None
             if tipo == "Promessa de pagamento":
                 promessa = st.date_input("Data prometida para pagamento", value=data_ref, format="DD/MM/YYYY")
-            if tipo in ["Cliente solicitou retorno", "Agendar retorno"]:
+
+            agendar_retorno = st.checkbox("Agendar nova cobrança/retorno", value=tipo in ["Cliente solicitou retorno", "Agendar retorno"])
+            retorno = None
+            if agendar_retorno:
                 retorno = st.date_input("Cobrar novamente em", value=data_ref, format="DD/MM/YYYY")
+
             observacao = st.text_area("Observação da ação", height=100, placeholder="Ex.: cliente informou que pagará após liberação interna...")
             salvar_acao = st.form_submit_button("Registrar no histórico do cliente", type="primary")
             if salvar_acao:
-                total = add_action_cliente(cliente_codigo, loja, nome_cliente, data_acao, tipo, responsavel, observacao, promessa)
+                obs_limpa = clean_history_text(observacao)
+                total = add_action_cliente(cliente_codigo, loja, nome_cliente, data_acao, tipo, responsavel, obs_limpa, promessa)
                 if retorno:
-                    add_agenda_retorno(cliente_codigo, loja, nome_cliente, retorno, observacao or tipo, responsavel)
-                st.success(f"Ação registrada para {total} título(s) aberto(s) do cliente. Indo para o próximo cliente da fila.")
-                advance_cliente_index(total_options)
+                    add_agenda_retorno(cliente_codigo, loja, nome_cliente, retorno, obs_limpa or tipo, responsavel)
+                st.success(f"Ação registrada para {total} título(s) aberto(s) do cliente. Cliente mantido na tela.")
+                st.session_state["cliente_index"] = selected_pos
                 st.rerun()
 
         st.markdown("#### Histórico do cliente")
@@ -1902,6 +1932,7 @@ elif page == "Cliente":
             else:
                 hist = hist.merge(titulos_cliente[["titulo_id", "numero_titulo", "parcela"]], on="titulo_id", how="left")
                 hist["data_acao"] = pd.to_datetime(hist["data_acao"], errors="coerce").dt.strftime("%d/%m/%Y")
+                hist["observacao"] = hist["observacao"].apply(clean_history_text)
                 st.dataframe(
                     hist[["data_acao", "numero_titulo", "parcela", "tipo_acao", "responsavel", "observacao", "promessa_pagamento"]].rename(columns={
                         "data_acao": "Data", "numero_titulo": "Título", "parcela": "Parcela", "tipo_acao": "Ação", "responsavel": "Responsável", "observacao": "Observação", "promessa_pagamento": "Promessa"
@@ -1964,11 +1995,16 @@ elif page == "Agenda":
         a3.metric("Futuros", len(futuros))
 
         filtro_status = st.selectbox("Status", ["Pendente", "Concluído", "Todos"])
+        filtro_resp_agenda = st.text_input("Filtrar responsável ou cliente", placeholder="Digite parte do nome")
         show = load_agenda(filtro_status)
         if not show.empty:
             show["data_dt"] = pd.to_datetime(show["data_retorno"], errors="coerce").dt.date
             show["Situação"] = show.apply(lambda r: "Atrasado" if r["status"] == "Pendente" and r["data_dt"] < hoje else ("Hoje" if r["status"] == "Pendente" and r["data_dt"] == hoje else ("Futuro" if r["status"] == "Pendente" else "Concluído")), axis=1)
             show["Data retorno"] = pd.to_datetime(show["data_retorno"], errors="coerce").dt.strftime("%d/%m/%Y")
+            show["motivo"] = show["motivo"].apply(clean_history_text)
+            if filtro_resp_agenda:
+                termo_agenda = filtro_resp_agenda.strip().lower()
+                show = show[show["nome_cliente"].str.lower().str.contains(termo_agenda, na=False) | show["responsavel"].str.lower().str.contains(termo_agenda, na=False)]
             ordem_situacao = {"Atrasado": 0, "Hoje": 1, "Futuro": 2, "Concluído": 3}
             show["ordem"] = show["Situação"].map(ordem_situacao).fillna(9)
             show = show.sort_values(["ordem", "data_retorno", "nome_cliente"])
@@ -2087,6 +2123,7 @@ elif page == "Histórico":
         if legacy_file:
             try:
                 df_legacy = read_legacy_history_upload(legacy_file)
+                df_legacy["historico_legado"] = df_legacy["historico_legado"].apply(clean_history_text)
                 st.success(f"Histórico lido: {len(df_legacy)} cliente(s)/bloco(s) encontrados.")
                 st.dataframe(
                     df_legacy[["cliente_codigo", "nome_cliente", "notas", "historico_legado"]].rename(columns={
@@ -2115,6 +2152,7 @@ elif page == "Histórico":
         if not tit.empty:
             hist = hist.merge(tit[["titulo_id", "nome_cliente", "numero_titulo", "parcela", "saldo_atual", "status", "vendedor", "gerente"]], on="titulo_id", how="left")
         hist["data_acao"] = pd.to_datetime(hist["data_acao"], errors="coerce").dt.strftime("%d/%m/%Y")
+        hist["observacao"] = hist["observacao"].apply(clean_history_text)
         hist["saldo_atual"] = hist["saldo_atual"].apply(br_money)
         st.dataframe(
             hist[["data_acao", "nome_cliente", "numero_titulo", "parcela", "tipo_acao", "responsavel", "observacao", "status", "vendedor", "gerente"]].rename(columns={
