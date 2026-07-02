@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 FIRST MEDICAL SERVICE
-CRM Financeiro de Cobrança
+CRM de Cobrança
 Versão inicial - upload diário de inadimplência Protheus
 
 Funcionalidades principais:
@@ -34,7 +34,7 @@ import pandas as pd
 import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
-APP_TITLE = "CRM Financeiro"
+APP_TITLE = "CRM de Cobrança"
 APP_VERSION = "v2.7"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
@@ -83,7 +83,7 @@ STATUS_PROMESSA = "Aguardando promessa"
 # Configuração visual
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="CRM Financeiro - First",
+    page_title="CRM de Cobrança - First",
     page_icon="💼",
     layout="wide",
 )
@@ -108,21 +108,6 @@ st.markdown(
         [data-testid="stSidebar"] {background: linear-gradient(180deg, #0B2341 0%, #123E67 100%);}
         [data-testid="stSidebar"] * {color: #FFFFFF !important;}
         [data-testid="stSidebar"] div[data-testid="stRadio"] label {font-weight: 700;}
-        [data-testid="stSidebar"] input,
-        [data-testid="stSidebar"] input[type="text"],
-        [data-testid="stSidebar"] textarea,
-        [data-testid="stSidebar"] [data-baseweb="input"] input,
-        [data-testid="stSidebar"] [data-baseweb="select"] *,
-        [data-testid="stSidebar"] div[data-baseweb="base-input"] input {
-            color: #101828 !important;
-            -webkit-text-fill-color: #101828 !important;
-        }
-        [data-testid="stSidebar"] div[data-baseweb="input"],
-        [data-testid="stSidebar"] div[data-baseweb="base-input"],
-        [data-testid="stSidebar"] .stDateInput div[data-baseweb="input"] {
-            background: #FFFFFF !important;
-            border-radius: 12px !important;
-        }
         [data-testid="stSidebar"] .stButton button {border-radius: 14px; border: 1px solid rgba(255,255,255,.25); background: rgba(255,255,255,.08); color: #fff;}
         .first-header {
             background:
@@ -134,28 +119,17 @@ st.markdown(
         .first-header h1 {margin: 0; font-size: 34px; font-weight: 900; letter-spacing: -.03em;}
         .first-header p {margin: 7px 0 0 0; opacity: .94; font-weight: 600;}
         .first-chip {display:inline-flex; align-items:center; gap:8px; background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.22); border-radius: 999px; padding: 7px 12px; margin-top: 14px; font-size: 13px; font-weight: 750;}
-        .section-title {font-size: 20px; font-weight: 900; color: #0B2341; margin: 18px 0 10px 0; letter-spacing: -.01em;}
+        .section-title {font-size: 20px; font-weight: 850; color: #0B2341; margin: 18px 0 10px 0; letter-spacing: -.01em;}
         .metric-card {
-            background: linear-gradient(180deg, #FFFFFF 0%, #FBFDFF 100%);
-            border-radius: 22px;
-            padding: 18px 20px;
-            border: 1px solid var(--first-border);
-            box-shadow: 0 10px 28px rgba(15,39,66,0.075);
-            min-height: 148px;
-            width: 100%;
-            overflow: visible;
-            box-sizing: border-box;
-            border-left: 5px solid #1267A8;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
+            background: rgba(255,255,255,.94); border-radius: 22px; padding: 18px 19px; border: 1px solid var(--first-border);
+            box-shadow: 0 10px 28px rgba(15,39,66,0.075); min-height: 112px;
+            width: 100%; overflow: visible; box-sizing: border-box; border-left: 5px solid #1267A8;
         }
         .metric-card:hover {transform: translateY(-1px); transition: .15s ease; box-shadow: 0 14px 36px rgba(15,39,66,0.10);}        
-        .metric-label {font-size: 11px; color: var(--first-muted); font-weight: 900; text-transform: uppercase; letter-spacing: .06em; line-height: 1.25; margin-bottom: 6px;}
-        .metric-value {font-size: clamp(18px, 1.45vw, 25px); color: var(--first-text); font-weight: 950; margin-top: 2px; line-height: 1.12; white-space: normal; overflow-wrap: normal; word-break: keep-all; hyphens: none;}
-        .metric-value.money {font-size: clamp(17px, 1.25vw, 22px); white-space: normal; overflow-wrap: normal; word-break: keep-all;}
-        .metric-value.long-text {font-size: clamp(17px, 1.35vw, 24px); overflow-wrap: anywhere; word-break: normal;}
-        .metric-help {font-size: 12px; color: #7B8798; margin-top: 7px; line-height: 1.28; white-space: normal; overflow-wrap: normal;}
+        .metric-label {font-size: 11.5px; color: var(--first-muted); font-weight: 850; text-transform: uppercase; letter-spacing: .05em; line-height: 1.25;}
+        .metric-value {font-size: clamp(21px, 2.15vw, 31px); color: var(--first-text); font-weight: 900; margin-top: 8px; line-height: 1.12; white-space: normal; overflow-wrap: anywhere; word-break: normal;}
+        .metric-value.long-text {font-size: clamp(18px, 1.65vw, 26px);}
+        .metric-help {font-size: 12.5px; color: #7B8798; margin-top: 6px; line-height: 1.28; white-space: normal; overflow-wrap: anywhere;}
         div[data-testid="stMetric"] {background: rgba(255,255,255,.94); border-radius: 20px; padding: 15px 16px; border: 1px solid var(--first-border); box-shadow: 0 9px 26px rgba(15,39,66,0.065); min-height: 104px; overflow: visible;}
         div[data-testid="stMetric"] label {white-space: normal !important; overflow-wrap: anywhere !important; color: var(--first-muted) !important; font-weight: 800 !important;}
         div[data-testid="stMetricValue"] {font-size: clamp(18px, 2vw, 28px) !important; white-space: normal !important; overflow: visible !important; text-overflow: unset !important; line-height: 1.15 !important; color: var(--first-text) !important; font-weight: 900 !important;}
@@ -176,8 +150,18 @@ st.markdown(
         .stTabs [data-baseweb="tab-list"] {gap: 8px;}
         .stTabs [data-baseweb="tab"] {border-radius: 999px; background: #FFFFFF; border: 1px solid var(--first-border); padding: 8px 16px;}
         .stTabs [aria-selected="true"] {background: #EAF5FF !important; color: #0B2341 !important; font-weight: 850;}
-        .paula-footer {text-align:center; color:#667085; font-size:13px; margin-top:32px; padding:18px 0 4px 0;}
-        .paula-footer strong {color:#0B2341;}
+
+        .compact-header {padding: 22px 28px !important; margin-bottom: 18px !important;}
+        .compact-header h1 {font-size: 32px !important;}
+        [data-testid="stSidebar"] input, [data-testid="stSidebar"] textarea {color: #0B2341 !important; background: #FFFFFF !important;}
+        [data-testid="stSidebar"] [data-baseweb="input"] * {color: #0B2341 !important;}
+        [data-testid="stSidebar"] label, [data-testid="stSidebar"] p {color: #FFFFFF !important;}
+        .sidebar-spacer {height: 22px;}
+        .metric-card {min-height: 150px !important; display:flex; flex-direction:column; justify-content:flex-start;}
+        .metric-value {font-size: clamp(18px, 1.65vw, 28px) !important; word-break: keep-all !important;}
+        .metric-help {min-height: 32px;}
+        .footer-first {margin-top: 28px; padding: 18px 8px; color: #667085; text-align:center; font-size: 13px;}
+        .footer-first b {color:#0B2341;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -481,14 +465,18 @@ def br_money(value: float | int | None) -> str:
     value = float(value or 0)
     return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-def br_money_compact(value: float | int | None) -> str:
+
+def br_money_short(value: float | int | None) -> str:
     value = float(value or 0)
     abs_value = abs(value)
+    sign = "-" if value < 0 else ""
     if abs_value >= 1_000_000:
-        return f"R$ {value / 1_000_000:,.2f} mi".replace(",", "X").replace(".", ",").replace("X", ".")
-    if abs_value >= 1_000:
-        return f"R$ {value / 1_000:,.1f} mil".replace(",", "X").replace(".", ",").replace("X", ".")
-    return br_money(value)
+        txt = f"{sign}R$ {abs_value / 1_000_000:.1f} mi"
+    elif abs_value >= 1_000:
+        txt = f"{sign}R$ {abs_value / 1_000:.1f} mil"
+    else:
+        txt = f"{sign}R$ {abs_value:,.2f}"
+    return txt.replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def to_date_str(value) -> Optional[str]:
@@ -1278,19 +1266,13 @@ def load_titulos_cliente(cliente_codigo: str, loja: str, nome_cliente: str, some
 
 
 def metric_card(label: str, value: str, help_text: str = "", long_text: bool = False) -> None:
-    text_value = str(value)
-    classes = ["metric-value"]
-    if long_text:
-        classes.append("long-text")
-    if "R$" in text_value:
-        classes.append("money")
-    help_html = f'<div class="metric-help">{html.escape(str(help_text))}</div>' if str(help_text).strip() else ""
+    value_class = "metric-value long-text" if long_text else "metric-value"
     st.markdown(
         f"""
         <div class="metric-card">
             <div class="metric-label">{html.escape(str(label))}</div>
-            <div class="{' '.join(classes)}">{html.escape(text_value)}</div>
-            {help_html}
+            <div class="{value_class}">{html.escape(str(value))}</div>
+            <div class="metric-help">{html.escape(str(help_text))}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1304,7 +1286,7 @@ init_db()
 
 st.markdown(
     f"""
-    <div class="first-header">
+    <div class="first-header compact-header">
         <h1>{APP_TITLE}</h1>
     </div>
     """,
@@ -1312,12 +1294,6 @@ st.markdown(
 )
 
 with st.sidebar:
-    st.markdown("""
-    <div style="padding: 6px 4px 18px 4px;">
-        <div style="font-size:30px;font-weight:950;letter-spacing:-.03em;line-height:1;color:#FFFFFF;">FIRST</div>
-        <div style="font-size:11px;font-weight:800;letter-spacing:.16em;color:#D7E8FA;margin-top:4px;">MEDICAL SERVICE</div>
-    </div>
-    """, unsafe_allow_html=True)
     st.markdown("### Navegação")
     NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Agenda", "Carteira", "Histórico", "Régua", "Base de títulos", "Segurança"]
     if "_pending_nav_page" in st.session_state:
@@ -1333,23 +1309,7 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     data_ref = st.date_input("Data de referência", value=date.today(), format="DD/MM/YYYY")
-    st.markdown("---")
-    st.markdown("""
-    <div style="background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.18);border-radius:18px;padding:14px 14px;margin-bottom:14px;">
-        <div style="font-size:14px;font-weight:900;color:#FFFFFF;">Paula Veríssimo</div>
-        <div style="font-size:12px;color:#D7E8FA;margin-top:2px;">Administradora do CRM</div>
-    </div>
-    """, unsafe_allow_html=True)
-    st.markdown("#### Segurança")
-    st.markdown(backup_status_html(), unsafe_allow_html=True)
-    st.markdown("---")
-    if st.button("Limpar filtros", use_container_width=True):
-        for k in list(st.session_state.keys()):
-            if k.startswith("fila_") or k.startswith("cliente_"):
-                del st.session_state[k]
-        st.session_state["_pending_nav_page"] = "Dashboard"
-        st.rerun()
-    
+    st.markdown("<div class='sidebar-spacer'></div>", unsafe_allow_html=True)
 
 
 if page == "Upload diário":
@@ -1358,8 +1318,6 @@ if page == "Upload diário":
 
     df_upload = None
     fonte_arquivo = None
-
-    st.markdown("#### Upload manual do relatório do dia")
     uploaded = st.file_uploader("Relatório: Títulos a receber vencidos", type=["xlsx", "xls"])
     if uploaded:
         try:
@@ -1418,7 +1376,7 @@ elif page == "Dashboard":
     open_titles = all_titles[all_titles["status"] != STATUS_PAGO].copy() if not all_titles.empty else pd.DataFrame()
     paid_titles = all_titles[all_titles["status"] == STATUS_PAGO].copy() if not all_titles.empty else pd.DataFrame()
 
-    st.markdown('<div class="section-title">Carteira de cobrança</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Visão executiva</div>', unsafe_allow_html=True)
     if all_titles.empty:
         st.warning("Ainda não existe histórico. Faça o primeiro upload diário para iniciar o CRM.")
     else:
@@ -1429,11 +1387,11 @@ elif page == "Dashboard":
         recebidos = float(paid_titles.loc[paid_titles["data_baixa"] == data_ref.isoformat(), "saldo_original"].sum()) if not paid_titles.empty else 0
 
         c1, c2, c3, c4, c5 = st.columns(5)
-        with c1: metric_card("Saldo em aberto", br_money_compact(total_aberto), "")
-        with c2: metric_card("Clientes", f"{clientes_abertos}", "")
-        with c3: metric_card("Títulos", f"{len(open_titles)}", "")
-        with c4: metric_card("Baixas hoje", br_money_compact(recebidos), "")
-        with c5: metric_card("Ações do dia", f"{acoes_hoje}", f"{promessas} promessa(s) aguardando")
+        with c1: metric_card("Valor em atraso", br_money_short(total_aberto), "Saldo a receber em aberto")
+        with c2: metric_card("Clientes", f"{clientes_abertos}", "Clientes com títulos vencidos")
+        with c3: metric_card("Títulos", f"{len(open_titles)}", "Títulos em cobrança")
+        with c4: metric_card("Recebidos hoje", br_money_short(recebidos), "Baixas automáticas/manual")
+        with c5: metric_card("Ações hoje", f"{acoes_hoje}", f"{promessas} promessas aguardando")
 
         b1, b2, b3, b4 = st.columns(4)
         if b1.button("Ver ações de hoje", use_container_width=True):
@@ -1445,14 +1403,14 @@ elif page == "Dashboard":
         if b4.button("Trabalhar próximo cliente", use_container_width=True):
             set_fila_filter("Cliente", cliente_acao="Todas", cliente_resp="Todos")
 
-        st.markdown('<div class="section-title">Próximas ações</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">O que fazer hoje</div>', unsafe_allow_html=True)
         if not fila.empty:
             acoes_resumo = fila.groupby("acao_do_dia", as_index=False).agg(Clientes=("cliente_id", "count"), Valor=("saldo_total", "sum")).sort_values("Valor", ascending=False).head(4)
             ac_cols = st.columns(4)
             for i, (_, row) in enumerate(acoes_resumo.iterrows()):
                 with ac_cols[i]:
                     metric_card(str(row["acao_do_dia"]), f"{int(row['Clientes'])} cliente(s)", br_money(row["Valor"]), long_text=True)
-        st.markdown('<div class="section-title">Fila consolidada por cliente</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Ações prioritárias</div>', unsafe_allow_html=True)
         if fila.empty:
             st.success("Nenhuma ação em aberto.")
         else:
@@ -1470,7 +1428,7 @@ elif page == "Dashboard":
                 hide_index=True,
             )
 
-        st.markdown("### Carteira por ação")
+        st.markdown("### Inadimplência por ação")
         if not fila.empty:
             grouped = fila.groupby("acao_do_dia", as_index=False).agg(
                 Clientes=("cliente_id", "count"), Titulos=("qtd_titulos", "sum"), Valor=("saldo_total", "sum")
@@ -1479,7 +1437,7 @@ elif page == "Dashboard":
             st.dataframe(grouped.rename(columns={"acao_do_dia": "Ação"}), use_container_width=True, hide_index=True)
 
 
-        st.markdown("### Carteira por gerente e vendedor")
+        st.markdown("### Inadimplência por gerente e vendedor")
         if not fila.empty:
             cger, cvend = st.columns(2)
             with cger:
@@ -1622,17 +1580,17 @@ elif page == "Cliente":
 
         c_cliente, c_saldo = st.columns([2.4, 1.1])
         with c_cliente:
-            metric_card("Cliente", nome_cliente, "", long_text=True)
+            metric_card("Cliente", nome_cliente, "Ação consolidada por cliente", long_text=True)
         with c_saldo:
-            metric_card("Saldo aberto", br_money(selected["saldo_total"]), "")
+            metric_card("Saldo total", br_money(selected["saldo_total"]), "Títulos abertos")
 
         c_tit, c_atraso, c_acao = st.columns([1, 1, 2])
         with c_tit:
-            metric_card("Títulos", int(selected["qtd_titulos"]), "")
+            metric_card("Títulos", int(selected["qtd_titulos"]), "Quantidade em aberto")
         with c_atraso:
-            metric_card("Maior atraso", f"{int(selected['maior_dias_atraso'])} dia(s)", "")
+            metric_card("Maior atraso", f"{int(selected['maior_dias_atraso'])} dia(s)", "Maior vencimento em aberto")
         with c_acao:
-            metric_card("Próxima ação", selected["acao_do_dia"], "", long_text=True)
+            metric_card("Ação única", selected["acao_do_dia"], "Próxima etapa da régua", long_text=True)
 
         st.markdown("#### Títulos abertos do cliente")
         tit_show = titulos_cliente.copy()
@@ -1963,4 +1921,11 @@ elif page == "Base de títulos":
         st.download_button("Baixar base filtrada CSV", csv, file_name="base_crm_cobranca.csv", mime="text/csv")
 
 
-st.markdown('<div class="paula-footer">Desenvolvido por <strong>Paula Verissimo</strong></div>', unsafe_allow_html=True)
+st.markdown(
+    f"""
+    <div class="footer-first">
+        CRM de Cobrança &nbsp; | &nbsp; <b>Desenvolvido por Paula Verissimo</b> &nbsp; | &nbsp; {APP_VERSION}
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
