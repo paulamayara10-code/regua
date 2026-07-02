@@ -20,6 +20,7 @@ streamlit run app_crm_cobranca_first.py
 from __future__ import annotations
 
 import sqlite3
+import re
 import html
 import shutil
 import zipfile
@@ -35,7 +36,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v2.7"
+APP_VERSION = "v2.8"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -656,6 +657,236 @@ def read_github_base(raw_url: str) -> pd.DataFrame:
     with urlopen(raw_url.strip(), timeout=30) as response:
         data = response.read()
     return read_excel_upload(data)
+
+
+
+
+def normalize_note_key(value) -> str:
+    """Normaliza o número do título/nota para permitir casamento entre relatórios diferentes."""
+    txt = normalize_text(value).upper()
+    if not txt:
+        return ""
+    nums = re.findall(r"\d+", txt)
+    if not nums:
+        return txt.replace(" ", "").replace("-", "")
+    # Em formatos como 003-000016843-001, o número do título é o penúltimo grupo.
+    if len(nums) >= 3 and len(nums[-1]) <= 3:
+        candidate = nums[-2]
+    else:
+        candidate = nums[-1]
+    candidate = candidate.lstrip("0")
+    return candidate or "0"
+
+
+def parse_legacy_prf_numero(value) -> tuple[str, str, str]:
+    """Extrai prefixo, número e parcela de campos como AFI-013998 ou 003-000016843-001."""
+    txt = normalize_text(value).upper()
+    if not txt:
+        return "", "", ""
+    parts = [x for x in re.split(r"[-\s]+", txt) if x]
+    nums = re.findall(r"\d+", txt)
+    prefixo = parts[0] if parts else ""
+    numero = ""
+    parcela = ""
+    if len(nums) >= 3 and len(nums[-1]) <= 3:
+        numero = nums[-2]
+        parcela = nums[-1]
+    elif nums:
+        numero = nums[-1]
+    return prefixo, numero, parcela
+
+
+def parse_legacy_cliente(value) -> tuple[str, str, str]:
+    """Lê campos no padrão Codigo-Lj-Nome do Cliente."""
+    txt = normalize_text(value)
+    m = re.match(r"^\s*(\d+)\s*-\s*([\w\d]+)\s*-\s*(.+)$", txt)
+    if m:
+        return m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
+    return "", "", txt
+
+
+def read_legacy_history_upload(file) -> pd.DataFrame:
+    """Lê a planilha antiga de tomada de decisão e transforma em histórico por bloco de cliente.
+
+    A planilha antiga costuma quebrar o texto do histórico em várias linhas do mesmo cliente.
+    Por isso o app consolida o texto do bloco e aplica o histórico completo aos títulos/Notas
+    encontrados naquele cliente.
+    """
+    file_bytes = file.read() if hasattr(file, "read") else bytes(file)
+    try:
+        raw = pd.read_excel(BytesIO(file_bytes))
+    except Exception:
+        raw = _xlsx_fallback_to_dataframe(file_bytes)
+
+    raw.columns = [str(c).strip() for c in raw.columns]
+    if raw.empty:
+        raise ValueError("A planilha de histórico está vazia.")
+
+    code_col = next((c for c in raw.columns if "Codigo" in c or "Código" in c), raw.columns[0])
+    prf_col = next((c for c in raw.columns if "Prf" in c or "Numero" in c or "Número" in c), raw.columns[1] if len(raw.columns) > 1 else raw.columns[0])
+    hist_col = next((c for c in raw.columns if "HIST" in c.upper()), None)
+    if hist_col is None:
+        raise ValueError("Não encontrei a coluna HISTÓRICO na planilha.")
+
+    # Colunas sem nome no final costumam carregar status/decisão, ex.: JURIDICO.
+    extra_cols = [c for c in raw.columns if c not in {code_col, prf_col, hist_col}]
+
+    blocks = []
+    current = None
+
+    def flush():
+        nonlocal current
+        if not current:
+            return
+        hist_lines = [h for h in current.get("hist_lines", []) if h]
+        note_keys = sorted(set([k for k in current.get("note_keys", []) if k]))
+        if hist_lines and note_keys:
+            hist = " ".join(hist_lines)
+            hist = re.sub(r"\s+", " ", hist).strip()
+            blocks.append({
+                "cliente_codigo": current.get("cliente_codigo", ""),
+                "loja": current.get("loja", ""),
+                "nome_cliente": current.get("nome_cliente", ""),
+                "notas": ", ".join(note_keys),
+                "historico_legado": hist,
+                "qtd_notas_planilha": len(note_keys),
+            })
+        current = None
+
+    for _, row in raw.iterrows():
+        code_val = normalize_text(row.get(code_col))
+        prf_val = normalize_text(row.get(prf_col))
+        hist_val = normalize_text(row.get(hist_col))
+
+        # Ignora cabeçalhos repetidos e linhas totalmente vazias.
+        if not code_val and not prf_val and not hist_val:
+            flush()
+            continue
+        if "Codigo" in code_val and ("Nome" in code_val or "Cliente" in code_val):
+            flush()
+            continue
+
+        # Linhas totalizadoras não possuem número do título; elas encerram o bloco.
+        if not prf_val:
+            flush()
+            continue
+
+        cliente_codigo, loja, nome_cliente = parse_legacy_cliente(code_val)
+        _, numero, parcela = parse_legacy_prf_numero(prf_val)
+        note_key = normalize_note_key(numero or prf_val)
+        cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
+
+        if current is None or current.get("cliente_id") != cid:
+            flush()
+            current = {
+                "cliente_id": cid,
+                "cliente_codigo": cliente_codigo,
+                "loja": loja,
+                "nome_cliente": nome_cliente,
+                "note_keys": [],
+                "hist_lines": [],
+            }
+
+        if note_key:
+            current["note_keys"].append(note_key)
+
+        if hist_val:
+            current["hist_lines"].append(hist_val)
+
+        for c in extra_cols:
+            extra = normalize_text(row.get(c))
+            if extra and not re.fullmatch(r"[\d.,]+", extra) and extra.upper() not in {"NAN", "NONE"}:
+                # Evita repetir colunas que são claramente dados financeiros/datas.
+                if extra.upper() not in hist_val.upper():
+                    current["hist_lines"].append(f"Decisão/status: {extra}")
+
+    flush()
+    out = pd.DataFrame(blocks)
+    if out.empty:
+        raise ValueError("Não encontrei histórico aproveitável na planilha enviada.")
+    return out
+
+
+def import_legacy_history(df_legacy: pd.DataFrame, data_ref: date, responsavel: str = "Importação legado", atualizar_observacao: bool = True) -> dict:
+    """Importa histórico legado casando por número da nota/título."""
+    backup_db("antes_historico_legado")
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        now = datetime.now().isoformat(timespec="seconds")
+        data_ref_str = data_ref.isoformat()
+        tit = pd.read_sql_query("SELECT titulo_id, cliente_codigo, loja, nome_cliente, numero_titulo, observacao_atual FROM titulos", conn)
+        if tit.empty:
+            raise ValueError("Ainda não existe base de títulos no CRM. Faça primeiro o upload diário do Protheus.")
+        tit["nota_key"] = tit["numero_titulo"].apply(normalize_note_key)
+        tit["cliente_codigo_norm"] = tit["cliente_codigo"].apply(normalize_text)
+
+        inseridos = 0
+        titulos_afetados = set()
+        sem_match = []
+
+        for _, rec in df_legacy.iterrows():
+            notas = [n.strip() for n in str(rec.get("notas", "")).split(",") if n.strip()]
+            cliente_codigo = normalize_text(rec.get("cliente_codigo"))
+            historico = normalize_text(rec.get("historico_legado"))
+            nome_cliente = normalize_text(rec.get("nome_cliente"))
+            if not notas or not historico:
+                continue
+
+            mask = tit["nota_key"].isin(notas)
+            if cliente_codigo:
+                mask_cliente = tit["cliente_codigo_norm"].eq(cliente_codigo)
+                matched = tit[mask & mask_cliente].copy()
+                if matched.empty:
+                    matched = tit[mask].copy()
+            else:
+                matched = tit[mask].copy()
+
+            if matched.empty:
+                sem_match.append(f"{nome_cliente or cliente_codigo}: {', '.join(notas)}")
+                continue
+
+            for _, t in matched.iterrows():
+                tid = str(t["titulo_id"])
+                obs = f"Histórico legado importado: {historico}"
+                exists = cur.execute(
+                    """
+                    SELECT 1 FROM historico_acoes
+                     WHERE titulo_id = ? AND tipo_acao = ? AND observacao = ?
+                     LIMIT 1
+                    """,
+                    (tid, "Histórico legado", obs),
+                ).fetchone()
+                if exists:
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO historico_acoes (titulo_id, data_acao, tipo_acao, responsavel, observacao, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (tid, data_ref_str, "Histórico legado", responsavel, obs, now),
+                )
+                if atualizar_observacao and not normalize_text(t.get("observacao_atual")):
+                    cur.execute(
+                        "UPDATE titulos SET observacao_atual = ?, updated_at = ? WHERE titulo_id = ?",
+                        (historico[:1500], now, tid),
+                    )
+                inseridos += 1
+                titulos_afetados.add(tid)
+
+        conn.commit()
+        return {
+            "historicos_inseridos": inseridos,
+            "titulos_afetados": len(titulos_afetados),
+            "blocos_lidos": len(df_legacy),
+            "sem_match": sem_match[:50],
+            "sem_match_total": len(sem_match),
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 # -----------------------------------------------------------------------------
@@ -1847,6 +2078,35 @@ elif page == "Segurança":
 
 elif page == "Histórico":
     st.markdown("### Histórico geral de cobrança")
+
+    with st.expander("Importar histórico legado por número da nota", expanded=False):
+        st.caption("Use para trazer observações de planilhas antigas e gravar no histórico dos títulos já existentes no CRM.")
+        legacy_file = st.file_uploader("Planilha de histórico de cobrança", type=["xlsx", "xls"], key="legacy_history_upload")
+        resp_import = st.text_input("Responsável pela importação", value="Importação legado")
+        atualizar_obs = st.checkbox("Preencher observação atual quando estiver vazia", value=True)
+        if legacy_file:
+            try:
+                df_legacy = read_legacy_history_upload(legacy_file)
+                st.success(f"Histórico lido: {len(df_legacy)} cliente(s)/bloco(s) encontrados.")
+                st.dataframe(
+                    df_legacy[["cliente_codigo", "nome_cliente", "notas", "historico_legado"]].rename(columns={
+                        "cliente_codigo": "Código", "nome_cliente": "Cliente", "notas": "Notas/Títulos", "historico_legado": "Histórico consolidado"
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                confirmar_legado = st.checkbox("Conferi a prévia e autorizo importar este histórico", value=False)
+                if st.button("Importar histórico legado", type="primary", use_container_width=True, disabled=not confirmar_legado):
+                    result = import_legacy_history(df_legacy, data_ref, resp_import, atualizar_obs)
+                    st.success(f"Importação concluída: {result['historicos_inseridos']} registro(s) incluído(s) em {result['titulos_afetados']} título(s).")
+                    if result["sem_match_total"]:
+                        st.warning(f"{result['sem_match_total']} bloco(s) não encontraram nota correspondente no CRM.")
+                        with st.expander("Ver não encontrados", expanded=False):
+                            st.write(result["sem_match"])
+                    st.rerun()
+            except Exception as exc:
+                st.error(f"Não consegui importar o histórico legado: {exc}")
+
     hist = load_historico()
     tit = load_titulos()
     if hist.empty:
