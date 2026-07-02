@@ -35,7 +35,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM Financeiro de Cobrança"
-APP_VERSION = "v2.1 - clientes especiais e agenda de retorno"
+APP_VERSION = "v2.4 - final executiva"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -91,34 +91,65 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-        .main {background-color: #f7f9fc;}
-        .block-container {padding-top: 1.5rem; padding-bottom: 2rem;}
+        :root {
+            --first-navy: #0B2341;
+            --first-blue: #1267A8;
+            --first-sky: #EAF5FF;
+            --first-bg: #F4F7FB;
+            --first-border: #DCE7F3;
+            --first-text: #101828;
+            --first-muted: #667085;
+            --first-green: #12B76A;
+            --first-yellow: #F79009;
+            --first-red: #D92D20;
+        }
+        .main, [data-testid="stAppViewContainer"] {background: radial-gradient(circle at top left, #eef7ff 0, #f7f9fc 35%, #f4f7fb 100%);}
+        .block-container {padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1480px;}
+        [data-testid="stSidebar"] {background: linear-gradient(180deg, #0B2341 0%, #123E67 100%);}
+        [data-testid="stSidebar"] * {color: #FFFFFF !important;}
+        [data-testid="stSidebar"] div[data-testid="stRadio"] label {font-weight: 700;}
+        [data-testid="stSidebar"] .stButton button {border-radius: 14px; border: 1px solid rgba(255,255,255,.25); background: rgba(255,255,255,.08); color: #fff;}
         .first-header {
-            background: linear-gradient(135deg, #0f2742 0%, #174d7c 55%, #1b6fae 100%);
-            color: white; padding: 24px 28px; border-radius: 20px; margin-bottom: 18px;
-            box-shadow: 0 10px 30px rgba(15,39,66,0.18);
+            background:
+              linear-gradient(135deg, rgba(11,35,65,.98) 0%, rgba(18,103,168,.96) 62%, rgba(58,166,255,.92) 100%);
+            color: white; padding: 26px 30px; border-radius: 26px; margin-bottom: 20px;
+            box-shadow: 0 18px 45px rgba(15,39,66,0.20); position: relative; overflow: hidden;
         }
-        .first-header h1 {margin: 0; font-size: 30px; font-weight: 800;}
-        .first-header p {margin: 6px 0 0 0; opacity: .92;}
+        .first-header:after {content:""; position:absolute; right:-70px; top:-90px; width:260px; height:260px; border-radius:50%; background:rgba(255,255,255,.12);}        
+        .first-header h1 {margin: 0; font-size: 34px; font-weight: 900; letter-spacing: -.03em;}
+        .first-header p {margin: 7px 0 0 0; opacity: .94; font-weight: 600;}
+        .first-chip {display:inline-flex; align-items:center; gap:8px; background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.22); border-radius: 999px; padding: 7px 12px; margin-top: 14px; font-size: 13px; font-weight: 750;}
+        .section-title {font-size: 20px; font-weight: 850; color: #0B2341; margin: 18px 0 10px 0; letter-spacing: -.01em;}
         .metric-card {
-            background: white; border-radius: 18px; padding: 16px 18px; border: 1px solid #e7edf5;
-            box-shadow: 0 6px 20px rgba(15,39,66,0.06); min-height: 104px;
-            width: 100%; overflow: visible; box-sizing: border-box;
+            background: rgba(255,255,255,.94); border-radius: 22px; padding: 18px 19px; border: 1px solid var(--first-border);
+            box-shadow: 0 10px 28px rgba(15,39,66,0.075); min-height: 112px;
+            width: 100%; overflow: visible; box-sizing: border-box; border-left: 5px solid #1267A8;
         }
-        .metric-label {font-size: 12px; color: #667085; font-weight: 750; text-transform: uppercase; letter-spacing: .035em; line-height: 1.25;}
-        .metric-value {font-size: clamp(20px, 2.1vw, 30px); color: #101828; font-weight: 850; margin-top: 8px; line-height: 1.15; white-space: normal; overflow-wrap: anywhere; word-break: normal;}
-        .metric-value.long-text {font-size: clamp(18px, 1.7vw, 26px);}
-        .metric-help {font-size: 12px; color: #98a2b3; margin-top: 5px; line-height: 1.25; white-space: normal; overflow-wrap: anywhere;}
-        div[data-testid="stMetric"] {background: white; border-radius: 18px; padding: 14px 16px; border: 1px solid #e7edf5; box-shadow: 0 6px 20px rgba(15,39,66,0.06); min-height: 100px; overflow: visible;}
-        div[data-testid="stMetric"] label {white-space: normal !important; overflow-wrap: anywhere !important;}
-        div[data-testid="stMetricValue"] {font-size: clamp(18px, 2vw, 28px) !important; white-space: normal !important; overflow: visible !important; text-overflow: unset !important; line-height: 1.15 !important;}
+        .metric-card:hover {transform: translateY(-1px); transition: .15s ease; box-shadow: 0 14px 36px rgba(15,39,66,0.10);}        
+        .metric-label {font-size: 11.5px; color: var(--first-muted); font-weight: 850; text-transform: uppercase; letter-spacing: .05em; line-height: 1.25;}
+        .metric-value {font-size: clamp(21px, 2.15vw, 31px); color: var(--first-text); font-weight: 900; margin-top: 8px; line-height: 1.12; white-space: normal; overflow-wrap: anywhere; word-break: normal;}
+        .metric-value.long-text {font-size: clamp(18px, 1.65vw, 26px);}
+        .metric-help {font-size: 12.5px; color: #7B8798; margin-top: 6px; line-height: 1.28; white-space: normal; overflow-wrap: anywhere;}
+        div[data-testid="stMetric"] {background: rgba(255,255,255,.94); border-radius: 20px; padding: 15px 16px; border: 1px solid var(--first-border); box-shadow: 0 9px 26px rgba(15,39,66,0.065); min-height: 104px; overflow: visible;}
+        div[data-testid="stMetric"] label {white-space: normal !important; overflow-wrap: anywhere !important; color: var(--first-muted) !important; font-weight: 800 !important;}
+        div[data-testid="stMetricValue"] {font-size: clamp(18px, 2vw, 28px) !important; white-space: normal !important; overflow: visible !important; text-overflow: unset !important; line-height: 1.15 !important; color: var(--first-text) !important; font-weight: 900 !important;}
         div[data-testid="stMetricValue"] > div {white-space: normal !important; overflow: visible !important; text-overflow: unset !important;}
         .section-card {
-            background: white; border-radius: 18px; padding: 18px; border: 1px solid #e7edf5;
-            box-shadow: 0 6px 20px rgba(15,39,66,0.06); margin-bottom: 16px;
+            background: rgba(255,255,255,.95); border-radius: 22px; padding: 19px; border: 1px solid var(--first-border);
+            box-shadow: 0 10px 28px rgba(15,39,66,0.07); margin-bottom: 16px;
         }
+        .action-card {background:#fff; border:1px solid var(--first-border); border-radius:18px; padding:15px 16px; box-shadow: 0 8px 20px rgba(15,39,66,.06); border-left: 5px solid #1267A8;}
+        .action-title {font-size: 13px; color: #667085; font-weight: 850; text-transform: uppercase; letter-spacing: .04em;}
+        .action-value {font-size: 24px; color:#0B2341; font-weight: 900; margin-top: 4px;}
         .small-muted {color:#667085; font-size:13px;}
-        div[data-testid="stDataFrame"] {background:white;}
+        .first-alert-ok {background:#ECFDF3; border:1px solid #ABEFC6; color:#067647; border-radius:16px; padding:12px 14px; font-weight:700;}
+        .first-alert-warn {background:#FFFAEB; border:1px solid #FEDF89; color:#B54708; border-radius:16px; padding:12px 14px; font-weight:700;}
+        .first-alert-danger {background:#FEF3F2; border:1px solid #FECDCA; color:#B42318; border-radius:16px; padding:12px 14px; font-weight:700;}
+        div[data-testid="stDataFrame"] {background:white; border-radius: 18px; overflow: hidden;}
+        .stButton button, .stDownloadButton button {border-radius: 14px !important; font-weight: 800 !important; min-height: 42px;}
+        .stTabs [data-baseweb="tab-list"] {gap: 8px;}
+        .stTabs [data-baseweb="tab"] {border-radius: 999px; background: #FFFFFF; border: 1px solid var(--first-border); padding: 8px 16px;}
+        .stTabs [aria-selected="true"] {background: #EAF5FF !important; color: #0B2341 !important; font-weight: 850;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -228,6 +259,47 @@ def db_health() -> Dict[str, object]:
 # -----------------------------------------------------------------------------
 # Banco de dados
 # -----------------------------------------------------------------------------
+
+def ultimo_backup_info() -> Tuple[Optional[Path], Optional[int]]:
+    """Retorna o backup mais recente e a idade em dias."""
+    ensure_storage()
+    backups = sorted(BACKUP_DIR.glob("*.db"), key=lambda x: x.stat().st_mtime if x.exists() else 0)
+    if not backups:
+        return None, None
+    ultimo = backups[-1]
+    idade = (datetime.now() - datetime.fromtimestamp(ultimo.stat().st_mtime)).days
+    return ultimo, idade
+
+
+def backup_status_html() -> str:
+    ultimo, idade = ultimo_backup_info()
+    if ultimo is None:
+        return '<div class="first-alert-danger">Backup: nenhum backup local encontrado.</div>'
+    if idade is not None and idade >= 2:
+        return f'<div class="first-alert-warn">Backup: último backup há {idade} dia(s).</div>'
+    return f'<div class="first-alert-ok">Backup: atualizado • {html.escape(ultimo.name)}</div>'
+
+
+def fila_to_export(df: pd.DataFrame) -> pd.DataFrame:
+    """Prepara a fila de clientes para exportação."""
+    if df.empty:
+        return df
+    out = df.copy()
+    out["Valor total"] = out["saldo_total"].apply(br_money)
+    out["Vencimento mais antigo"] = pd.to_datetime(out["menor_vencimento"], errors="coerce").dt.strftime("%d/%m/%Y")
+    keep = [
+        "nome_cliente", "tipo_cliente", "cobrador", "qtd_titulos", "Valor total",
+        "Vencimento mais antigo", "maior_dias_atraso", "dia_regua", "acao_do_dia",
+        "vendedor", "gerente", "observacoes"
+    ]
+    keep = [c for c in keep if c in out.columns]
+    return out[keep].rename(columns={
+        "nome_cliente": "Cliente", "tipo_cliente": "Tipo de cliente", "cobrador": "Cobrador",
+        "qtd_titulos": "Títulos", "maior_dias_atraso": "Maior atraso",
+        "dia_regua": "Dia régua", "acao_do_dia": "Ação do dia",
+        "vendedor": "Vendedor", "gerente": "Gerente", "observacoes": "Observações"
+    })
+
 def get_conn() -> sqlite3.Connection:
     ensure_storage()
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -1192,6 +1264,7 @@ st.markdown(
     <div class="first-header">
         <h1>{APP_TITLE}</h1>
         <p>{APP_NAME} • {APP_VERSION}</p>
+        <div class="first-chip">Carteira de inadimplência • histórico preservado • cobrança por cliente</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -1213,6 +1286,20 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     data_ref = st.date_input("Data de referência", value=date.today(), format="DD/MM/YYYY")
+    st.markdown("---")
+    st.markdown("#### Segurança")
+    st.markdown(backup_status_html(), unsafe_allow_html=True)
+    try:
+        pacote_sidebar = export_backup_zip()
+        st.download_button(
+            "Backup agora",
+            pacote_sidebar,
+            file_name=f"crm_financeiro_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
+    except Exception:
+        st.caption("Backup disponível após iniciar o banco.")
     st.markdown("---")
     if st.button("Limpar filtros", use_container_width=True):
         for k in list(st.session_state.keys()):
@@ -1268,15 +1355,20 @@ if page == "Upload diário":
                 preview_cols = ["Filial", "Prefixo", "No. Titulo", "Parcela", "Cliente", "Nome Cliente", "Vencto real", "Saldo a receber"]
                 st.dataframe(df_upload[preview_cols], use_container_width=True, hide_index=True)
 
-            if st.button("Atualizar CRM com este relatório", type="primary", use_container_width=True):
+            st.markdown(backup_status_html(), unsafe_allow_html=True)
+            confirmar_update = st.checkbox(
+                "Conferi a prévia e autorizo atualizar o CRM com este relatório",
+                value=False,
+                help="Antes de salvar o novo upload, o sistema cria backup automático do banco atual."
+            )
+            if st.button("Atualizar CRM com este relatório", type="primary", use_container_width=True, disabled=not confirmar_update):
                 novos, atualizados, pagos, valor_aberto = process_upload(df_upload, data_ref, str(fonte_arquivo))
                 st.success("CRM atualizado com sucesso.")
                 a, b, c, d = st.columns(4)
-                a.metric("Novos", novos)
-                b.metric("Atualizados", atualizados)
-                c.metric("Pagos identificados", pagos)
-                d.metric("Valor aberto", br_money(valor_aberto))
-                st.info("Para não perder o histórico no Streamlit Cloud, baixe o backup abaixo após atualizar o CRM.")
+                with a: metric_card("Novos", str(novos), "Entraram na régua")
+                with b: metric_card("Mantidos", str(atualizados), "Continuam em aberto")
+                with c: metric_card("Pagos", str(pagos), "Saíram do relatório")
+                with d: metric_card("Valor aberto", br_money(valor_aberto), "Saldo do arquivo")
                 pacote = export_backup_zip()
                 st.download_button(
                     "Baixar backup do CRM agora",
@@ -1296,7 +1388,7 @@ elif page == "Dashboard":
     open_titles = all_titles[all_titles["status"] != STATUS_PAGO].copy() if not all_titles.empty else pd.DataFrame()
     paid_titles = all_titles[all_titles["status"] == STATUS_PAGO].copy() if not all_titles.empty else pd.DataFrame()
 
-    st.markdown("### Visão executiva")
+    st.markdown('<div class="section-title">Visão executiva</div>', unsafe_allow_html=True)
     if all_titles.empty:
         st.warning("Ainda não existe histórico. Faça o primeiro upload diário para iniciar o CRM.")
     else:
@@ -1323,7 +1415,14 @@ elif page == "Dashboard":
         if b4.button("Trabalhar próximo cliente", use_container_width=True):
             set_fila_filter("Cliente", cliente_acao="Todas", cliente_resp="Todos")
 
-        st.markdown("### Ações prioritárias")
+        st.markdown('<div class="section-title">O que fazer hoje</div>', unsafe_allow_html=True)
+        if not fila.empty:
+            acoes_resumo = fila.groupby("acao_do_dia", as_index=False).agg(Clientes=("cliente_id", "count"), Valor=("saldo_total", "sum")).sort_values("Valor", ascending=False).head(4)
+            ac_cols = st.columns(4)
+            for i, (_, row) in enumerate(acoes_resumo.iterrows()):
+                with ac_cols[i]:
+                    metric_card(str(row["acao_do_dia"]), f"{int(row['Clientes'])} cliente(s)", br_money(row["Valor"]), long_text=True)
+        st.markdown('<div class="section-title">Ações prioritárias</div>', unsafe_allow_html=True)
         if fila.empty:
             st.success("Nenhuma ação em aberto.")
         else:
@@ -1382,6 +1481,9 @@ elif page == "Fila por cliente":
         vendedores = ["Todos"] + sorted(fila["vendedor"].replace("", "Sem vendedor").dropna().unique().tolist())
         colf4.selectbox("Gerente", gerentes, key="fila_gerente")
         colf5.selectbox("Vendedor", vendedores, key="fila_vendedor")
+        colf6, colf7 = st.columns(2)
+        colf6.selectbox("Tipo de cliente", ["Todos", "Especial", "Não especial"], key="fila_tipo_cliente")
+        colf7.selectbox("Cobrador", ["Todos"] + sorted(fila["cobrador"].replace("", "Sem cobrador").dropna().unique().tolist()), key="fila_cobrador")
 
         filtered = apply_fila_filters(fila, prefix="fila")
 
@@ -1389,6 +1491,21 @@ elif page == "Fila por cliente":
         at1.metric("Clientes filtrados", len(filtered))
         at2.metric("Títulos", int(filtered["qtd_titulos"].sum()) if not filtered.empty else 0)
         at3.metric("Valor", br_money(filtered["saldo_total"].sum()) if not filtered.empty else br_money(0))
+
+        if not filtered.empty:
+            try:
+                export_fila = fila_to_export(filtered)
+                arquivo_fila = safe_to_excel_bytes({"Fila filtrada": export_fila})
+                st.download_button(
+                    "Exportar fila filtrada",
+                    arquivo_fila,
+                    file_name=f"fila_cobranca_{data_ref.strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            except Exception:
+                csv_fila = fila_to_export(filtered).to_csv(index=False, sep=";", encoding="utf-8-sig")
+                st.download_button("Exportar fila filtrada CSV", csv_fila, file_name="fila_cobranca.csv", mime="text/csv", use_container_width=True)
 
         if st.button("Abrir primeiro cliente desta fila", type="primary", use_container_width=True, disabled=filtered.empty):
             st.session_state["cliente_index"] = 0
@@ -1442,23 +1559,27 @@ elif page == "Cliente":
             st.session_state["cliente_index"] = 0
         st.session_state["cliente_index"] = min(int(st.session_state.get("cliente_index", 0) or 0), total_options - 1)
 
-        nav_a, nav_b, nav_c = st.columns([1, 1, 2])
+        nav_a, nav_b, nav_c, nav_d = st.columns([1, 1, 1.15, 1.8])
         if nav_a.button("Cliente anterior", use_container_width=True, disabled=st.session_state["cliente_index"] <= 0):
             st.session_state["cliente_index"] = max(st.session_state["cliente_index"] - 1, 0)
             st.rerun()
         if nav_b.button("Próximo cliente", use_container_width=True, disabled=st.session_state["cliente_index"] >= total_options - 1):
             st.session_state["cliente_index"] = min(st.session_state["cliente_index"] + 1, total_options - 1)
             st.rerun()
-        nav_c.caption(f"Cliente {st.session_state['cliente_index'] + 1} de {total_options} na fila filtrada")
+        pos_desejada = int(nav_c.number_input("Ir para", min_value=1, max_value=total_options, value=int(st.session_state["cliente_index"]) + 1, step=1, label_visibility="visible"))
+        if nav_d.button(f"Abrir cliente {pos_desejada}/{total_options}", use_container_width=True):
+            st.session_state["cliente_index"] = pos_desejada - 1
+            st.rerun()
+        st.caption(f"Cliente {st.session_state['cliente_index'] + 1}/{total_options} na fila filtrada")
 
+        options["ordem_fila"] = options.index + 1
         options["label"] = options.apply(
-            lambda r: f"{r['nome_cliente']} • {int(r['qtd_titulos'])} título(s) • {br_money(r['saldo_total'])} • {r['acao_do_dia']}", axis=1
+            lambda r: f"{int(r['ordem_fila'])}/{total_options} • {r['nome_cliente']} • {int(r['qtd_titulos'])} título(s) • {br_money(r['saldo_total'])} • {r['acao_do_dia']}", axis=1
         )
         selected_label = st.selectbox(
             "Selecione o cliente para ação única",
             options["label"].tolist(),
             index=int(st.session_state["cliente_index"]),
-            key="cliente_selectbox",
         )
         selected_pos = int(options.index[options["label"] == selected_label][0])
         st.session_state["cliente_index"] = selected_pos
@@ -1496,35 +1617,29 @@ elif page == "Cliente":
                 hide_index=True,
             )
 
-        st.markdown("#### Carteira de cobrança")
+        st.markdown("#### Dados da carteira")
         tipo_atual = str(selected.get("tipo_cliente", "Não especial") or "Não especial")
         cobrador_atual = str(selected.get("cobrador", "") or "")
-        with st.form("form_carteira_cliente"):
-            cm1, cm2 = st.columns(2)
-            tipo_cliente = cm1.selectbox("Tipo de cliente", ["Não especial", "Especial"], index=0 if tipo_atual != "Especial" else 1)
-            cobrador = cm2.text_input("Pessoa responsável pela cobrança", value=cobrador_atual, placeholder="Ex.: Cobrança Especial / Cobrança Padrão / nome")
-            salvar_meta = st.form_submit_button("Salvar carteira do cliente", type="primary")
-            if salvar_meta:
-                update_cliente_meta(cliente_codigo, loja, nome_cliente, tipo_cliente, cobrador)
-                st.success("Carteira do cliente atualizada.")
-                st.rerun()
-
-        st.markdown("#### Responsáveis do cliente/títulos")
         vendedor_padrao = str(selected["vendedor"] or "")
         gerente_padrao = str(selected["gerente"] or "")
         obs_padrao = ""
         if not titulos_cliente.empty:
             obs_padrao = _join_unique(titulos_cliente["observacao_atual"], limite=1)
-        with st.form("form_responsaveis_cliente"):
+
+        with st.form("form_dados_cliente_unico"):
+            cmeta1, cmeta2 = st.columns(2)
+            tipo_cliente = cmeta1.selectbox("Tipo de cliente", ["Não especial", "Especial"], index=0 if tipo_atual != "Especial" else 1)
+            cobrador = cmeta2.text_input("Responsável pela cobrança", value=cobrador_atual, placeholder="Ex.: Cobrança Especial / Cobrança Padrão / nome")
             r1, r2 = st.columns(2)
             vendedor = r1.text_input("Vendedor", value=vendedor_padrao)
             gerente = r2.text_input("Gerente", value=gerente_padrao)
             obs_atual = st.text_area("Observação atual do cliente", value=obs_padrao, height=90)
-            salvar_resp = st.form_submit_button("Salvar responsáveis/observação em todos os títulos abertos", type="primary")
-            if salvar_resp:
+            salvar_alteracoes = st.form_submit_button("Salvar alterações do cliente", type="primary", use_container_width=True)
+            if salvar_alteracoes:
+                update_cliente_meta(cliente_codigo, loja, nome_cliente, tipo_cliente, cobrador)
                 total = update_cliente_fields(cliente_codigo, loja, nome_cliente, vendedor, gerente, obs_atual)
-                st.success(f"Responsáveis atualizados em {total} título(s) aberto(s). Indo para o próximo cliente da fila.")
-                advance_cliente_index(total_options)
+                st.success(f"Alterações salvas com segurança em {total} título(s) aberto(s). O cliente atual será mantido na tela.")
+                st.session_state["cliente_index"] = selected_pos
                 st.rerun()
 
         st.markdown("#### Registrar ação única do cliente")
@@ -1632,9 +1747,14 @@ elif page == "Agenda":
         filtro_status = st.selectbox("Status", ["Pendente", "Concluído", "Todos"])
         show = load_agenda(filtro_status)
         if not show.empty:
+            show["data_dt"] = pd.to_datetime(show["data_retorno"], errors="coerce").dt.date
+            show["Situação"] = show.apply(lambda r: "Atrasado" if r["status"] == "Pendente" and r["data_dt"] < hoje else ("Hoje" if r["status"] == "Pendente" and r["data_dt"] == hoje else ("Futuro" if r["status"] == "Pendente" else "Concluído")), axis=1)
             show["Data retorno"] = pd.to_datetime(show["data_retorno"], errors="coerce").dt.strftime("%d/%m/%Y")
+            ordem_situacao = {"Atrasado": 0, "Hoje": 1, "Futuro": 2, "Concluído": 3}
+            show["ordem"] = show["Situação"].map(ordem_situacao).fillna(9)
+            show = show.sort_values(["ordem", "data_retorno", "nome_cliente"])
             st.dataframe(
-                show[["id", "Data retorno", "nome_cliente", "responsavel", "motivo", "status"]].rename(columns={
+                show[["id", "Situação", "Data retorno", "nome_cliente", "responsavel", "motivo", "status"]].rename(columns={
                     "id": "ID", "nome_cliente": "Cliente", "responsavel": "Responsável", "motivo": "Motivo", "status": "Status"
                 }),
                 use_container_width=True,
@@ -1702,7 +1822,7 @@ elif page == "Segurança":
     c3.metric("Histórico", int(health.get("historico", 0)))
     c4.metric("Último backup", health.get("ultimo_backup") or "Sem backup")
 
-    st.warning("No Streamlit Cloud, arquivos salvos dentro do app podem sumir após reboot/redeploy. O histórico só fica seguro se você baixar o backup ou restaurar de uma base externa.")
+    st.markdown(backup_status_html(), unsafe_allow_html=True)
 
     st.markdown("#### Restaurar backup")
     restore_file = st.file_uploader("Restaurar pacote do CRM (.zip) ou banco (.db)", type=["zip", "db"])
