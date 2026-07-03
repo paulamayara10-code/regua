@@ -43,7 +43,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v5.4 LTS"
+APP_VERSION = "v5.6 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -3359,8 +3359,31 @@ elif page == "Relatórios":
             "cliente_codigo", "loja", "nome_cliente", "tipo_cliente", "cobrador",
             "razao_social", "cnpj", "contato"
         ]
-        meta = clientes_meta[meta_cols].drop_duplicates(["cliente_codigo", "loja", "nome_cliente"]) if not clientes_meta.empty else pd.DataFrame(columns=meta_cols)
-        base = tit_base.merge(meta, on=["cliente_codigo", "loja", "nome_cliente"], how="left")
+        # A base de títulos já pode conter razão social, CNPJ e contato. Ao juntar
+        # os dados do cliente, o pandas cria colunas com sufixos. Consolidamos as
+        # duas fontes para evitar KeyError e preservar o dado já salvo no título.
+        meta_disponiveis = [c for c in meta_cols if c in clientes_meta.columns]
+        meta = (
+            clientes_meta[meta_disponiveis]
+            .drop_duplicates(["cliente_codigo", "loja", "nome_cliente"])
+            if not clientes_meta.empty
+            else pd.DataFrame(columns=meta_cols)
+        )
+        base = tit_base.merge(
+            meta,
+            on=["cliente_codigo", "loja", "nome_cliente"],
+            how="left",
+            suffixes=("", "_cadastro"),
+        )
+        for campo in ["tipo_cliente", "cobrador", "razao_social", "cnpj", "contato"]:
+            campo_cad = f"{campo}_cadastro"
+            if campo not in base.columns:
+                base[campo] = ""
+            base[campo] = base[campo].fillna("").astype(str)
+            if campo_cad in base.columns:
+                cadastro = base[campo_cad].fillna("").astype(str)
+                base[campo] = base[campo].where(base[campo].str.strip().ne(""), cadastro)
+                base = base.drop(columns=[campo_cad])
         base["vendedor"] = base["vendedor"].fillna("").apply(canonical_vendor_display).replace("", "Sem vendedor")
         base["gerente"] = base["gerente"].fillna("").apply(canonical_manager_display).replace("", "Sem gerente")
         base["segmento"] = base["segmento"].fillna("").apply(canonical_segment_display).replace("", "Sem segmento")
@@ -3454,12 +3477,22 @@ elif page == "Relatórios":
         else:
             resumo_show = pd.DataFrame(columns=[modo_rel, "Clientes", "Titulos", "Valor", "Maior atraso"])
 
-        detalhes_export = rel[[
+        colunas_detalhes = [
             "nome_cliente", "cliente_codigo", "loja", "prefixo", "numero_titulo", "parcela", "tipo",
             "segmento", "vencimento", "valor_titulo", "saldo_atual", "dias_atraso", "faixa_atraso",
             "acao_do_dia", "vendedor", "gerente", "tipo_cliente", "cobrador", "razao_social", "cnpj",
             "contato", "status", "observacao_atual"
-        ]].copy() if not rel.empty else pd.DataFrame()
+        ]
+        if not rel.empty:
+            # Proteção adicional: uma coluna opcional ausente nunca deve derrubar
+            # a tela de relatórios. Campos não disponíveis saem vazios no Excel.
+            rel_export = rel.copy()
+            for coluna in colunas_detalhes:
+                if coluna not in rel_export.columns:
+                    rel_export[coluna] = ""
+            detalhes_export = rel_export[colunas_detalhes].copy()
+        else:
+            detalhes_export = pd.DataFrame(columns=colunas_detalhes)
         if not detalhes_export.empty:
             detalhes_export["Vencimento"] = pd.to_datetime(detalhes_export["vencimento"], errors="coerce").dt.strftime("%d/%m/%Y")
             detalhes_export["Valor título"] = detalhes_export["valor_titulo"].apply(br_money)
