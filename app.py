@@ -178,6 +178,22 @@ st.markdown(
 # Armazenamento e backups
 # -----------------------------------------------------------------------------
 def ensure_storage_basic() -> None:
+    """Garante a pasta local de dados.
+
+    Proteção extra para Streamlit/GitHub: se existir um ARQUIVO chamado
+    "dados" na raiz do repositório, o pathlib levantaria FileExistsError ao
+    tentar criar a pasta. Nessa situação o app preserva esse arquivo com outro
+    nome e cria a pasta correta, evitando que o sistema pare na inicialização.
+    """
+    if DATA_DIR.exists() and DATA_DIR.is_file():
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        destino = Path(f"dados_arquivo_encontrado_{stamp}.bak")
+        try:
+            DATA_DIR.replace(destino)
+        except Exception:
+            # Último recurso: remove somente o arquivo local vazio/conflitante.
+            # Isso não apaga o banco do CRM, pois o banco fica dentro da pasta dados/.
+            DATA_DIR.unlink(missing_ok=True)
     DATA_DIR.mkdir(exist_ok=True)
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -293,8 +309,13 @@ def find_base_bi_bytes() -> Tuple[Optional[bytes], str]:
         Path("dados/BASE BI.xlsx"), Path("dados/base_faturamento.xlsx"),
     ]
     for cand in local_candidates:
-        if cand.exists():
-            return cand.read_bytes(), f"BASE BI local: {cand.as_posix()}"
+        if cand.exists() and cand.is_file():
+            data = cand.read_bytes()
+            # Arquivos vazios/quebrados no GitHub podem ter 0, 2 ou poucos bytes.
+            # Ignora e tenta o próximo candidato para não mostrar falso "0 linhas".
+            if len(data) < 200:
+                continue
+            return data, f"BASE BI local: {cand.as_posix()}"
 
     configured = get_config("base_faturamento_github", "").strip() if DB_PATH.exists() else ""
     if configured:
@@ -1375,6 +1396,147 @@ def get_action_for_day(ciclo: int, status: str, promessa: Optional[str], ref: da
     }
 
 
+
+
+def aplicar_base_bi_titulos_existentes() -> Dict[str, object]:
+    """Preenche vendedor/gerente dos títulos já existentes usando a BASE BI.
+
+    Regra de segurança:
+    - não apaga histórico;
+    - não recria tabelas;
+    - só preenche vendedor/gerente quando o campo está vazio;
+    - respeita o que foi informado manualmente no CRM.
+    """
+    backup_db("antes_aplicar_base_bi")
+    try:
+        faturamento_maps, faturamento_status = load_faturamento_maps_from_github()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "mensagem": f"Erro ao ler BASE BI: {exc}",
+            "analisados": 0,
+            "localizados": 0,
+            "titulos_atualizados": 0,
+            "clientes_atualizados": 0,
+            "sem_match": [],
+        }
+
+    conn = get_conn()
+    try:
+        titulos = pd.read_sql_query(
+            """
+            SELECT titulo_id, numero_titulo, cliente_codigo, loja, nome_cliente, vendedor, gerente,
+                   razao_social, cnpj, contato, status
+              FROM titulos
+             WHERE status != ?
+            """,
+            conn,
+            params=[STATUS_PAGO],
+        )
+        if titulos.empty:
+            return {
+                "ok": True,
+                "mensagem": "Não há títulos em aberto para atualizar.",
+                "analisados": 0,
+                "localizados": 0,
+                "titulos_atualizados": 0,
+                "clientes_atualizados": 0,
+                "sem_match": [],
+            }
+
+        now = datetime.now().isoformat(timespec="seconds")
+        cur = conn.cursor()
+        analisados = len(titulos)
+        localizados = 0
+        titulos_atualizados = 0
+        clientes_atualizados_ids = set()
+        sem_match = []
+
+        for _, t in titulos.iterrows():
+            row_lookup = pd.Series({
+                "No. Titulo": t.get("numero_titulo", ""),
+                "Cliente": t.get("cliente_codigo", ""),
+                "Loja": t.get("loja", ""),
+                "Nome Cliente": t.get("nome_cliente", ""),
+            })
+            info = get_faturamento_info_for(row_lookup, faturamento_maps)
+            if not info or not (info.get("vendedor") or info.get("gerente") or info.get("razao_social")):
+                if len(sem_match) < 80:
+                    sem_match.append(f"{normalize_text(t.get('numero_titulo'))} • {normalize_text(t.get('nome_cliente'))}")
+                continue
+
+            localizados += 1
+            vendedor_atual = normalize_text(t.get("vendedor"))
+            gerente_atual = normalize_text(t.get("gerente"))
+            razao_atual = normalize_text(t.get("razao_social"))
+            cnpj_atual = normalize_text(t.get("cnpj"))
+            contato_atual = normalize_text(t.get("contato"))
+
+            vendedor_novo = vendedor_atual or normalize_text(info.get("vendedor"))
+            gerente_novo = gerente_atual or normalize_text(info.get("gerente"))
+            razao_nova = razao_atual or normalize_text(info.get("razao_social"))
+            cnpj_novo = cnpj_atual or normalize_text(info.get("cnpj"))
+            contato_novo = contato_atual or normalize_text(info.get("contato"))
+
+            if (vendedor_novo != vendedor_atual or gerente_novo != gerente_atual or
+                razao_nova != razao_atual or cnpj_novo != cnpj_atual or contato_novo != contato_atual):
+                cur.execute(
+                    """
+                    UPDATE titulos
+                       SET vendedor = ?, gerente = ?, razao_social = ?, cnpj = ?, contato = ?,
+                           origem_vendedor = CASE WHEN COALESCE(origem_vendedor, '') = '' AND ? != '' THEN 'BASE BI' ELSE origem_vendedor END,
+                           origem_gerente = CASE WHEN COALESCE(origem_gerente, '') = '' AND ? != '' THEN 'BASE BI' ELSE origem_gerente END,
+                           updated_at = ?
+                     WHERE titulo_id = ?
+                    """,
+                    (vendedor_novo, gerente_novo, razao_nova, cnpj_novo, contato_novo,
+                     normalize_text(info.get("vendedor")), normalize_text(info.get("gerente")), now, t["titulo_id"]),
+                )
+                titulos_atualizados += 1
+
+            cid = make_cliente_id(t.get("cliente_codigo", ""), t.get("loja", ""), t.get("nome_cliente", ""))
+            # Atualiza o cadastro do cliente apenas preenchendo campos vazios.
+            upsert_cliente_cadastro(
+                conn,
+                normalize_text(t.get("cliente_codigo")),
+                normalize_text(t.get("loja")),
+                normalize_text(t.get("nome_cliente")),
+                vendedor=normalize_text(info.get("vendedor")),
+                gerente=normalize_text(info.get("gerente")),
+                razao_social=normalize_text(info.get("razao_social")),
+                cnpj=normalize_text(info.get("cnpj")),
+                contato=normalize_text(info.get("contato")),
+            )
+            clientes_atualizados_ids.add(cid)
+
+        conn.commit()
+        try:
+            upload_db_to_github("aplicar_base_bi")
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "mensagem": faturamento_status,
+            "analisados": analisados,
+            "localizados": localizados,
+            "titulos_atualizados": titulos_atualizados,
+            "clientes_atualizados": len(clientes_atualizados_ids),
+            "sem_match": sem_match,
+        }
+    except Exception as exc:
+        conn.rollback()
+        return {
+            "ok": False,
+            "mensagem": f"Erro ao aplicar BASE BI: {exc}",
+            "analisados": 0,
+            "localizados": 0,
+            "titulos_atualizados": 0,
+            "clientes_atualizados": 0,
+            "sem_match": [],
+        }
+    finally:
+        conn.close()
+
 def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple[int, int, int, float, int, int, str]:
     backup_db("antes_upload")
     conn = get_conn()
@@ -2217,6 +2379,23 @@ if page == "Upload diário":
                 st.success(status_base)
         except Exception as exc:
             st.warning(f"BASE BI indisponível: {exc}")
+
+    with st.expander("Atualizar responsáveis dos títulos já existentes", expanded=False):
+        st.caption("Use esta opção quando a BASE BI já foi carregada, mas os títulos antigos ainda aparecem sem vendedor ou sem gerente. O histórico é preservado e os campos manuais não são sobrescritos.")
+        if st.button("Aplicar BASE BI nos títulos já existentes", use_container_width=True):
+            resultado_bi = aplicar_base_bi_titulos_existentes()
+            if resultado_bi.get("ok"):
+                st.success("BASE BI aplicada nos títulos existentes.")
+                r1, r2, r3, r4 = st.columns(4)
+                r1.metric("Títulos analisados", resultado_bi.get("analisados", 0))
+                r2.metric("Localizados", resultado_bi.get("localizados", 0))
+                r3.metric("Títulos atualizados", resultado_bi.get("titulos_atualizados", 0))
+                r4.metric("Clientes atualizados", resultado_bi.get("clientes_atualizados", 0))
+                if resultado_bi.get("sem_match"):
+                    with st.expander("Ver títulos sem correspondência", expanded=False):
+                        st.write(resultado_bi.get("sem_match"))
+            else:
+                st.error(resultado_bi.get("mensagem", "Não foi possível aplicar a BASE BI."))
 
     uploaded = st.file_uploader("Relatório: Títulos a receber vencidos", type=["xlsx", "xls"])
     if uploaded:
