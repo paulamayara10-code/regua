@@ -403,6 +403,13 @@ def upload_db_to_github(reason: str = "sincronizacao") -> Tuple[bool, str]:
         st.session_state["github_last_sync"] = datetime.now().isoformat(timespec="seconds")
         st.session_state["github_sync_msg"] = "Banco salvo no GitHub."
         return True, "Banco salvo no GitHub."
+    except HTTPError as e:
+        if e.code == 403:
+            msg = "Falha ao salvar no GitHub: acesso negado (403). Revise o token: repositório correto e permissão Contents = Read and write."
+        else:
+            msg = f"Falha ao salvar no GitHub: HTTP {e.code}."
+        st.session_state["github_sync_msg"] = msg
+        return False, msg
     except Exception as e:
         st.session_state["github_sync_msg"] = f"Falha ao salvar no GitHub: {e}"
         return False, f"Falha ao salvar no GitHub: {e}"
@@ -1050,6 +1057,44 @@ def normalize_note_key(value) -> str:
     return candidate.lstrip("0") or "0"
 
 
+
+
+def looks_like_vendedor_codigo(value) -> bool:
+    """Identifica códigos comerciais que não devem aparecer no relatório como nome."""
+    txt = normalize_text(value).upper().strip()
+    if not txt:
+        return True
+    parts = [p.strip() for p in txt.split(",") if p.strip()]
+    if parts and all(re.fullmatch(r"(INT|VEN|REP)?\d+", p) for p in parts):
+        return True
+    return bool(re.fullmatch(r"(INT|VEN|REP)\d+", txt))
+
+
+def should_replace_auto_field(current_value, origin_value: str = "") -> bool:
+    """Troca somente campos vazios ou claramente automáticos/códigos."""
+    txt = normalize_text(current_value)
+    origin = normalize_text(origin_value).upper()
+    if not txt:
+        return True
+    if origin == "BASE BI":
+        return True
+    if looks_like_vendedor_codigo(txt):
+        return True
+    # Corrige combinações criadas automaticamente, ex.: "AMAURI, RENATO".
+    if "," in txt:
+        return True
+    return False
+
+
+def choose_info(prefer: dict, fallback: dict) -> dict:
+    """Combina informações usando a base por nota como prioridade."""
+    prefer = prefer or {}
+    fallback = fallback or {}
+    out = {}
+    for k in ["vendedor", "gerente", "razao_social", "cnpj", "contato", "origem"]:
+        out[k] = normalize_text(prefer.get(k)) or normalize_text(fallback.get(k))
+    return out
+
 def build_faturamento_maps(df_base: pd.DataFrame) -> tuple[dict, dict, dict, dict]:
     """Cria mapas para enriquecer vendedor/gerente a partir da BASE BI.
 
@@ -1068,7 +1113,11 @@ def build_faturamento_maps(df_base: pd.DataFrame) -> tuple[dict, dict, dict, dic
     col_razao = find_col(df_base, ["Razão Social", "Razao Social", "NOME DO CLIENTE", "Nome Cliente", "A1_NREDUZ"])
     col_cnpj = find_col(df_base, ["CNPJ", "CPF/CNPJ", "CNPJ/CPF", "A1_CGC", "CGC"])
     col_contato = find_col(df_base, ["Contato", "Responsável", "Responsavel", "Contato Financeiro", "Email", "E-mail", "Telefone"])
-    col_vendedor = find_col(df_base, ["VENDEDOR", "Vendedor", "Nome Vendedor", "Representante", "Consultor", "Comercial"])
+    col_vendedor = find_col(df_base, [
+        "VENDEDOR / REPRESENTANTE", "Nome Vendedor", "Nome do Vendedor",
+        "Vendedor Representante", "Representante", "Consultor Comercial",
+        "VENDEDOR", "Vendedor", "Consultor", "Comercial"
+    ])
     col_gerente = find_col(df_base, ["GERENTE", "Gerente", "Gerente Comercial", "Supervisor", "Coordenador"])
 
     by_nota, by_cliente_loja, by_cliente, by_nome = {}, {}, {}, {}
@@ -1426,7 +1475,7 @@ def aplicar_base_bi_titulos_existentes() -> Dict[str, object]:
         titulos = pd.read_sql_query(
             """
             SELECT titulo_id, numero_titulo, cliente_codigo, loja, nome_cliente, vendedor, gerente,
-                   razao_social, cnpj, contato, status
+                   razao_social, cnpj, contato, origem_vendedor, origem_gerente, status
               FROM titulos
              WHERE status != ?
             """,
@@ -1472,8 +1521,8 @@ def aplicar_base_bi_titulos_existentes() -> Dict[str, object]:
             cnpj_atual = normalize_text(t.get("cnpj"))
             contato_atual = normalize_text(t.get("contato"))
 
-            vendedor_novo = vendedor_atual or normalize_text(info.get("vendedor"))
-            gerente_novo = gerente_atual or normalize_text(info.get("gerente"))
+            vendedor_novo = normalize_text(info.get("vendedor")) if should_replace_auto_field(vendedor_atual, t.get("origem_vendedor")) else vendedor_atual
+            gerente_novo = normalize_text(info.get("gerente")) if should_replace_auto_field(gerente_atual, t.get("origem_gerente")) else gerente_atual
             razao_nova = razao_atual or normalize_text(info.get("razao_social"))
             cnpj_novo = cnpj_atual or normalize_text(info.get("cnpj"))
             contato_novo = contato_atual or normalize_text(info.get("contato"))
@@ -1501,8 +1550,6 @@ def aplicar_base_bi_titulos_existentes() -> Dict[str, object]:
                 normalize_text(t.get("cliente_codigo")),
                 normalize_text(t.get("loja")),
                 normalize_text(t.get("nome_cliente")),
-                vendedor=normalize_text(info.get("vendedor")),
-                gerente=normalize_text(info.get("gerente")),
                 razao_social=normalize_text(info.get("razao_social")),
                 cnpj=normalize_text(info.get("cnpj")),
                 contato=normalize_text(info.get("contato")),
@@ -1572,21 +1619,27 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
                 base_bi_cruzados += 1
             else:
                 base_bi_nao_localizados += 1
-            vendedor_cad = str(cad.get("vendedor", "") or auto_info.get("vendedor", "") or "")
-            gerente_cad = str(cad.get("gerente", "") or auto_info.get("gerente", "") or "")
+            # Vendedor/Gerente devem vir prioritariamente da NF na BASE BI.
+            # O cadastro do cliente serve como fallback/manual, mas não deve espalhar um responsável de outra NF.
+            vendedor_cad = str(auto_info.get("vendedor", "") or cad.get("vendedor", "") or "")
+            gerente_cad = str(auto_info.get("gerente", "") or cad.get("gerente", "") or "")
             obs_cad = str(cad.get("observacao", "") or "")
             razao_cad = str(cad.get("razao_social", "") or auto_info.get("razao_social", "") or "")
             cnpj_cad = str(cad.get("cnpj", "") or auto_info.get("cnpj", "") or "")
             contato_cad = str(cad.get("contato", "") or auto_info.get("contato", "") or "")
-            upsert_cliente_cadastro(conn, cliente_codigo, loja, nome_cliente, vendedor=vendedor_cad, gerente=gerente_cad, razao_social=razao_cad, cnpj=cnpj_cad, contato=contato_cad)
+            # Mantém cadastro do cliente para dados gerais, mas NÃO grava vendedor/gerente automáticos no cliente.
+            # Isso evita que um cliente com várias NFs/segmentos herde o responsável de outra nota.
+            upsert_cliente_cadastro(conn, cliente_codigo, loja, nome_cliente, razao_social=razao_cad, cnpj=cnpj_cad, contato=contato_cad)
 
             if tid in existing_ids:
-                cur.execute("SELECT primeira_aparicao, vendedor, gerente, observacao_atual, razao_social, cnpj, contato FROM titulos WHERE titulo_id = ?", (tid,))
+                cur.execute("SELECT primeira_aparicao, vendedor, gerente, observacao_atual, razao_social, cnpj, contato, origem_vendedor, origem_gerente FROM titulos WHERE titulo_id = ?", (tid,))
                 old_row = cur.fetchone()
                 first = old_row["primeira_aparicao"]
                 ciclo = calcular_ciclo(first, data_ref)
-                vendedor_final = vendedor_cad or str(old_row["vendedor"] or "")
-                gerente_final = gerente_cad or str(old_row["gerente"] or "")
+                old_vendedor = str(old_row["vendedor"] or "")
+                old_gerente = str(old_row["gerente"] or "")
+                vendedor_final = (vendedor_cad if should_replace_auto_field(old_vendedor, str(old_row["origem_vendedor"] or "")) else old_vendedor)
+                gerente_final = (gerente_cad if should_replace_auto_field(old_gerente, str(old_row["origem_gerente"] or "")) else old_gerente)
                 obs_final = obs_cad or str(old_row["observacao_atual"] or "")
                 razao_final = razao_cad or str(old_row["razao_social"] or "")
                 cnpj_final = cnpj_cad or str(old_row["cnpj"] or "")
@@ -1597,6 +1650,8 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
                        SET filial = ?, prefixo = ?, numero_titulo = ?, parcela = ?, tipo = ?,
                            cliente_codigo = ?, loja = ?, nome_cliente = ?, dt_emissao = ?, vencimento = ?,
                            valor_titulo = ?, saldo_atual = ?, multa = ?, juros = ?, vendedor = ?, gerente = ?, observacao_atual = ?, razao_social = ?, cnpj = ?, contato = ?,
+                           origem_vendedor = CASE WHEN ? != '' AND ? != ? THEN 'BASE BI' ELSE COALESCE(origem_vendedor, '') END,
+                           origem_gerente = CASE WHEN ? != '' AND ? != ? THEN 'BASE BI' ELSE COALESCE(origem_gerente, '') END,
                            status = CASE WHEN status = 'Pago' THEN 'Em cobrança' ELSE status END,
                            ultima_aparicao = ?, data_baixa = NULL, ciclo_cobranca = ?, updated_at = ?
                      WHERE titulo_id = ?
@@ -1607,6 +1662,8 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
                         nome_cliente, row.get("dt_emissao_str"), row.get("vencimento_str"),
                         float(row.get("Vlr.Titulo", 0)), float(row.get("Saldo a receber", 0)), float(row.get("Multa", 0)), float(row.get("Juros", 0)),
                         vendedor_final, gerente_final, obs_final, razao_final, cnpj_final, contato_final,
+                        normalize_text(auto_info.get("vendedor")), old_vendedor, vendedor_final,
+                        normalize_text(auto_info.get("gerente")), old_gerente, gerente_final,
                         data_ref_str, ciclo, now, tid,
                     ),
                 )
@@ -1617,15 +1674,18 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
                     INSERT INTO titulos (
                         titulo_id, filial, prefixo, numero_titulo, parcela, tipo, cliente_codigo, loja,
                         nome_cliente, dt_emissao, vencimento, valor_titulo, saldo_original, saldo_atual,
-                        multa, juros, vendedor, gerente, observacao_atual, razao_social, cnpj, contato, status, primeira_aparicao, ultima_aparicao, ciclo_cobranca, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        multa, juros, vendedor, gerente, observacao_atual, razao_social, cnpj, contato,
+                        origem_vendedor, origem_gerente, status, primeira_aparicao, ultima_aparicao, ciclo_cobranca, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         tid, normalize_text(row.get("Filial")), normalize_text(row.get("Prefixo")), normalize_text(row.get("No. Titulo")),
                         normalize_text(row.get("Parcela")), normalize_text(row.get("Tipo")), cliente_codigo, loja,
                         nome_cliente, row.get("dt_emissao_str"), row.get("vencimento_str"),
                         float(row.get("Vlr.Titulo", 0)), float(row.get("Saldo a receber", 0)), float(row.get("Saldo a receber", 0)),
-                        float(row.get("Multa", 0)), float(row.get("Juros", 0)), vendedor_cad, gerente_cad, obs_cad, razao_cad, cnpj_cad, contato_cad, STATUS_ATIVO, data_ref_str, data_ref_str, 1, now, now,
+                        float(row.get("Multa", 0)), float(row.get("Juros", 0)), vendedor_cad, gerente_cad, obs_cad, razao_cad, cnpj_cad, contato_cad,
+                        "BASE BI" if normalize_text(auto_info.get("vendedor")) else "", "BASE BI" if normalize_text(auto_info.get("gerente")) else "",
+                        STATUS_ATIVO, data_ref_str, data_ref_str, 1, now, now,
                     ),
                 )
                 cur.execute(
