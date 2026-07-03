@@ -29,6 +29,8 @@ import os
 import hashlib
 import zipfile
 import xml.etree.ElementTree as ET
+import unicodedata
+from collections import Counter, defaultdict
 from io import BytesIO
 from datetime import date, datetime
 from pathlib import Path
@@ -41,7 +43,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v5.0 LTS"
+APP_VERSION = "v5.4 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -558,13 +560,13 @@ def fila_to_export(df: pd.DataFrame) -> pd.DataFrame:
     keep = [
         "nome_cliente", "tipo_cliente", "cobrador", "qtd_titulos", "Valor total",
         "Vencimento mais antigo", "maior_dias_atraso", "dia_regua", "acao_do_dia",
-        "vendedor", "gerente", "observacoes"
+        "segmento", "vendedor", "gerente", "observacoes"
     ]
     keep = [c for c in keep if c in out.columns]
     return out[keep].rename(columns={
         "nome_cliente": "Cliente", "tipo_cliente": "Tipo de cliente", "cobrador": "Cobrador",
         "qtd_titulos": "Títulos", "maior_dias_atraso": "Maior atraso",
-        "dia_regua": "Dia régua", "acao_do_dia": "Ação do dia",
+        "dia_regua": "Dia régua", "acao_do_dia": "Ação do dia", "segmento": "Segmento",
         "vendedor": "Vendedor", "gerente": "Gerente", "observacoes": "Observações"
     })
 
@@ -724,6 +726,8 @@ def init_db() -> None:
     ensure_column("titulos", "contato", "TEXT DEFAULT ''")
     ensure_column("titulos", "origem_vendedor", "TEXT DEFAULT ''")
     ensure_column("titulos", "origem_gerente", "TEXT DEFAULT ''")
+    ensure_column("titulos", "segmento", "TEXT DEFAULT ''")
+    ensure_column("titulos", "origem_segmento", "TEXT DEFAULT ''")
     ensure_column("uploads", "base_bi_cruzados", "INTEGER DEFAULT 0")
     ensure_column("uploads", "base_bi_nao_localizados", "INTEGER DEFAULT 0")
     ensure_column("uploads", "base_bi_status", "TEXT DEFAULT ''")
@@ -1070,6 +1074,61 @@ def looks_like_vendedor_codigo(value) -> bool:
     return bool(re.fullmatch(r"(INT|VEN|REP)\d+", txt))
 
 
+def _ascii_upper(value) -> str:
+    txt = normalize_text(value).strip().upper()
+    txt = unicodedata.normalize("NFKD", txt)
+    txt = "".join(ch for ch in txt if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", txt).strip()
+
+
+def canonical_vendor_key(value) -> str:
+    """Chave para unir variações do mesmo vendedor.
+
+    Exemplos considerados iguais:
+    - GOLOMBIESKI ... LT
+    - GOLOMBIESKI ... LTDA
+    - GOLOMBIESKI ..., LTDA.
+    """
+    txt = _ascii_upper(value)
+    if not txt:
+        return ""
+    txt = re.sub(r"[^A-Z0-9]+", " ", txt)
+    tokens = [t for t in txt.split() if t]
+    # Sufixos societários não diferenciam o vendedor.
+    suffixes = {
+        "LT", "LTDA", "LIMITADA", "ME", "EPP", "EIRELI", "SLU",
+        "SA", "S", "A", "S/A", "CIA", "COMPANHIA",
+    }
+    while tokens and tokens[-1] in suffixes:
+        tokens.pop()
+    return " ".join(tokens)
+
+
+def canonical_vendor_display(value) -> str:
+    """Nome padronizado para exibição e agrupamento."""
+    txt = _ascii_upper(value)
+    if not txt:
+        return ""
+    txt = re.sub(r"\s*[,.;]+\s*", " ", txt)
+    txt = re.sub(r"\s+", " ", txt).strip()
+    # Corrige abreviação truncada recorrente da base.
+    txt = re.sub(r"\bLT\.?$", "LTDA", txt)
+    txt = re.sub(r"\bLIMITADA$", "LTDA", txt)
+    return txt
+
+
+def canonical_manager_display(value) -> str:
+    txt = _ascii_upper(value)
+    txt = re.sub(r"[^A-Z0-9 ]+", " ", txt)
+    return re.sub(r"\s+", " ", txt).strip()
+
+
+def canonical_segment_display(value) -> str:
+    txt = _ascii_upper(value)
+    txt = re.sub(r"\s+", " ", txt).strip()
+    return txt
+
+
 def should_replace_auto_field(current_value, origin_value: str = "") -> bool:
     """Troca somente campos vazios ou claramente automáticos/códigos."""
     txt = normalize_text(current_value)
@@ -1086,19 +1145,52 @@ def should_replace_auto_field(current_value, origin_value: str = "") -> bool:
     return False
 
 
+def should_replace_segment(current_value, origin_value: str = "") -> bool:
+    txt = normalize_text(current_value)
+    origin = normalize_text(origin_value).upper()
+    return (not txt) or origin == "BASE BI" or "," in txt or txt.upper() == "VÁRIOS"
+
+
 def choose_info(prefer: dict, fallback: dict) -> dict:
     """Combina informações usando a base por nota como prioridade."""
     prefer = prefer or {}
     fallback = fallback or {}
     out = {}
-    for k in ["vendedor", "gerente", "razao_social", "cnpj", "contato", "origem"]:
+    for k in ["vendedor", "gerente", "segmento", "razao_social", "cnpj", "contato", "origem"]:
         out[k] = normalize_text(prefer.get(k)) or normalize_text(fallback.get(k))
     return out
 
-def build_faturamento_maps(df_base: pd.DataFrame) -> tuple[dict, dict, dict, dict]:
-    """Cria mapas para enriquecer vendedor/gerente a partir da BASE BI.
 
-    Prioridade no CRM: 1) Nota Fiscal/Título; 2) Cliente+loja; 3) Código; 4) Nome.
+def _safe_amount(value) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        try:
+            return abs(float(value))
+        except Exception:
+            return 0.0
+    txt = normalize_text(value).replace("R$", "").replace(" ", "")
+    if not txt:
+        return 0.0
+    # Trata 1.234,56 e 1234.56.
+    if "," in txt:
+        txt = txt.replace(".", "").replace(",", ".")
+    try:
+        return abs(float(txt))
+    except Exception:
+        return 0.0
+
+
+def build_faturamento_maps(df_base: pd.DataFrame) -> tuple[dict, dict, dict, dict]:
+    """Cria mapas da BASE BI com uma única combinação por NF/segmento.
+
+    Regras:
+    - A NF é a chave principal.
+    - Dentro da NF, os itens são consolidados por SEGMENTO.
+    - Se a NF tiver mais de um segmento, prevalece o segmento de maior valor.
+    - Dentro do segmento vencedor, prevalece uma única dupla vendedor/gerente.
+    - Variações de nome do vendedor (pontuação, LT/LTDA) são unificadas.
+    - Dados comerciais nunca são herdados de outra NF do mesmo cliente.
     """
     if df_base.empty:
         return {}, {}, {}, {}
@@ -1119,36 +1211,112 @@ def build_faturamento_maps(df_base: pd.DataFrame) -> tuple[dict, dict, dict, dic
         "VENDEDOR", "Vendedor", "Consultor", "Comercial"
     ])
     col_gerente = find_col(df_base, ["GERENTE", "Gerente", "Gerente Comercial", "Supervisor", "Coordenador"])
+    col_segmento = find_col(df_base, ["SEGMENTO", "Segmento", "Segmento Comercial", "Linha/Segmento", "SEGMENTO - 1"])
+    col_valor = find_col(df_base, ["VALOR BRUTO", "VALOR", "Valor Bruto", "Valor", "VALOR ", "Vlr.Total", "Valor Total"])
 
-    by_nota, by_cliente_loja, by_cliente, by_nome = {}, {}, {}, {}
+    # Primeiro identifica uma grafia preferencial para cada vendedor equivalente.
+    vendor_variants: dict[str, Counter] = defaultdict(Counter)
     for _, r in df_base.iterrows():
-        info = {
-            "vendedor": normalize_text(r.get(col_vendedor, "")) if col_vendedor else "",
-            "gerente": normalize_text(r.get(col_gerente, "")) if col_gerente else "",
+        raw = normalize_text(r.get(col_vendedor, "")) if col_vendedor else ""
+        key = canonical_vendor_key(raw)
+        if key:
+            vendor_variants[key][canonical_vendor_display(raw)] += 1
+
+    preferred_vendor: dict[str, str] = {}
+    for key, counts in vendor_variants.items():
+        # A grafia mais longa resolve LT x LTDA; frequência funciona como desempate.
+        preferred_vendor[key] = max(counts.keys(), key=lambda v: (len(v), counts[v]))
+
+    # Consolida por NF + segmento e, dentro do grupo, por dupla vendedor/gerente.
+    groups: dict[tuple[str, str], dict] = {}
+    note_groups: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    by_cliente_loja, by_cliente, by_nome = {}, {}, {}
+
+    for _, r in df_base.iterrows():
+        nota_key = normalize_note_key(r.get(col_nota, "")) if col_nota else ""
+        segmento = canonical_segment_display(r.get(col_segmento, "")) if col_segmento else ""
+        segmento = segmento or "SEM SEGMENTO"
+        vendedor_raw = normalize_text(r.get(col_vendedor, "")) if col_vendedor else ""
+        vendedor_key = canonical_vendor_key(vendedor_raw)
+        vendedor = preferred_vendor.get(vendedor_key, canonical_vendor_display(vendedor_raw))
+        gerente = canonical_manager_display(r.get(col_gerente, "")) if col_gerente else ""
+        amount = _safe_amount(r.get(col_valor, 0)) if col_valor else 0.0
+        # Quando o valor não estiver preenchido, cada linha vale 1 para o critério de desempate.
+        weight = amount if amount > 0 else 1.0
+
+        general = {
+            "vendedor": vendedor,
+            "gerente": gerente,
+            "segmento": segmento,
             "razao_social": normalize_text(r.get(col_razao, "")) if col_razao else "",
             "cnpj": normalize_text(r.get(col_cnpj, "")) if col_cnpj else "",
             "contato": normalize_text(r.get(col_contato, "")) if col_contato else "",
             "origem": "BASE BI",
         }
-        if not (info.get("vendedor") or info.get("gerente") or info.get("razao_social")):
-            continue
 
-        nota_key = normalize_note_key(r.get(col_nota, "")) if col_nota else ""
-        if nota_key and nota_key not in by_nota:
-            by_nota[nota_key] = info
+        if nota_key:
+            gkey = (nota_key, normalize_col_key(segmento))
+            if gkey not in groups:
+                groups[gkey] = {
+                    "nota": nota_key,
+                    "segmento": segmento,
+                    "total_value": 0.0,
+                    "rows": 0,
+                    "pair_value": defaultdict(float),
+                    "pair_count": Counter(),
+                    "general": general.copy(),
+                }
+                note_groups[nota_key].append(gkey)
+            g = groups[gkey]
+            pair = (vendedor, gerente)
+            g["total_value"] += weight
+            g["rows"] += 1
+            g["pair_value"][pair] += weight
+            g["pair_count"][pair] += 1
+            # Preenche dados gerais que porventura estavam vazios na primeira linha.
+            for fld in ["razao_social", "cnpj", "contato"]:
+                if not g["general"].get(fld) and general.get(fld):
+                    g["general"][fld] = general[fld]
 
+        # Fallback apenas para dados cadastrais. Vendedor/gerente/segmento ficam vazios
+        # para impedir que uma NF herde responsáveis de outra NF do mesmo cliente.
+        cadastro_info = {
+            "vendedor": "", "gerente": "", "segmento": "",
+            "razao_social": general.get("razao_social", ""),
+            "cnpj": general.get("cnpj", ""),
+            "contato": general.get("contato", ""),
+            "origem": "BASE BI",
+        }
         cliente = normalize_text(r.get(col_cliente, "")) if col_cliente else ""
         loja = normalize_text(r.get(col_loja, "")) if col_loja else ""
         nome = normalize_text(r.get(col_nome, "")) if col_nome else ""
         if cliente and loja and f"{cliente}|{loja}".upper() not in by_cliente_loja:
-            by_cliente_loja[f"{cliente}|{loja}".upper()] = info
+            by_cliente_loja[f"{cliente}|{loja}".upper()] = cadastro_info
         if cliente and cliente.upper() not in by_cliente:
-            by_cliente[cliente.upper()] = info
+            by_cliente[cliente.upper()] = cadastro_info
         if nome and normalize_col_key(nome) not in by_nome:
-            by_nome[normalize_col_key(nome)] = info
-        cnpj = _digits(info.get("cnpj"))
+            by_nome[normalize_col_key(nome)] = cadastro_info
+        cnpj = _digits(cadastro_info.get("cnpj"))
         if cnpj and f"CNPJ:{cnpj}" not in by_nome:
-            by_nome[f"CNPJ:{cnpj}"] = info
+            by_nome[f"CNPJ:{cnpj}"] = cadastro_info
+
+    by_nota = {}
+    for nota_key, gkeys in note_groups.items():
+        candidates = []
+        for gkey in gkeys:
+            g = groups[gkey]
+            pair = max(
+                g["pair_value"].keys(),
+                key=lambda p: (g["pair_value"][p], g["pair_count"][p], bool(p[1]), bool(p[0]))
+            ) if g["pair_value"] else ("", "")
+            info = g["general"].copy()
+            info["vendedor"], info["gerente"] = pair
+            info["segmento"] = g["segmento"]
+            candidates.append((g["total_value"], g["rows"], info))
+        # Um único segmento/responsável por NF: maior valor, depois maior quantidade de linhas.
+        candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        by_nota[nota_key] = candidates[0][2]
+
     return by_nota, by_cliente_loja, by_cliente, by_nome
 
 
@@ -1164,13 +1332,14 @@ def get_faturamento_info_for(row, maps: tuple) -> dict:
     cliente = normalize_text(row.get("Cliente"))
     loja = normalize_text(row.get("Loja"))
     nome = normalize_text(row.get("Nome Cliente"))
-    return (
-        by_nota.get(nota_key)
-        or by_cliente_loja.get(f"{cliente}|{loja}".upper())
+    note_info = by_nota.get(nota_key) or {}
+    fallback = (
+        by_cliente_loja.get(f"{cliente}|{loja}".upper())
         or by_cliente.get(cliente.upper())
         or by_nome.get(normalize_col_key(nome))
         or {}
     )
+    return choose_info(note_info, fallback)
 
 
 def load_faturamento_maps_from_github() -> tuple[tuple[dict, dict, dict, dict], str]:
@@ -1474,8 +1643,8 @@ def aplicar_base_bi_titulos_existentes() -> Dict[str, object]:
     try:
         titulos = pd.read_sql_query(
             """
-            SELECT titulo_id, numero_titulo, cliente_codigo, loja, nome_cliente, vendedor, gerente,
-                   razao_social, cnpj, contato, origem_vendedor, origem_gerente, status
+            SELECT titulo_id, numero_titulo, cliente_codigo, loja, nome_cliente, vendedor, gerente, segmento,
+                   razao_social, cnpj, contato, origem_vendedor, origem_gerente, origem_segmento, status
               FROM titulos
              WHERE status != ?
             """,
@@ -1520,26 +1689,34 @@ def aplicar_base_bi_titulos_existentes() -> Dict[str, object]:
             razao_atual = normalize_text(t.get("razao_social"))
             cnpj_atual = normalize_text(t.get("cnpj"))
             contato_atual = normalize_text(t.get("contato"))
+            segmento_atual = normalize_text(t.get("segmento"))
 
-            vendedor_novo = normalize_text(info.get("vendedor")) if should_replace_auto_field(vendedor_atual, t.get("origem_vendedor")) else vendedor_atual
-            gerente_novo = normalize_text(info.get("gerente")) if should_replace_auto_field(gerente_atual, t.get("origem_gerente")) else gerente_atual
+            replace_vendedor = should_replace_auto_field(vendedor_atual, t.get("origem_vendedor"))
+            replace_gerente = should_replace_auto_field(gerente_atual, t.get("origem_gerente"))
+            replace_segmento = should_replace_segment(segmento_atual, t.get("origem_segmento"))
+            vendedor_novo = canonical_vendor_display(info.get("vendedor")) if replace_vendedor else canonical_vendor_display(vendedor_atual)
+            gerente_novo = canonical_manager_display(info.get("gerente")) if replace_gerente else canonical_manager_display(gerente_atual)
+            segmento_novo = canonical_segment_display(info.get("segmento")) if replace_segmento else canonical_segment_display(segmento_atual)
+            origem_vendedor_nova = "BASE BI" if replace_vendedor and normalize_text(info.get("vendedor")) else normalize_text(t.get("origem_vendedor"))
+            origem_gerente_nova = "BASE BI" if replace_gerente and normalize_text(info.get("gerente")) else normalize_text(t.get("origem_gerente"))
+            origem_segmento_nova = "BASE BI" if replace_segmento and normalize_text(info.get("segmento")) else normalize_text(t.get("origem_segmento"))
             razao_nova = razao_atual or normalize_text(info.get("razao_social"))
             cnpj_novo = cnpj_atual or normalize_text(info.get("cnpj"))
             contato_novo = contato_atual or normalize_text(info.get("contato"))
 
-            if (vendedor_novo != vendedor_atual or gerente_novo != gerente_atual or
-                razao_nova != razao_atual or cnpj_novo != cnpj_atual or contato_novo != contato_atual):
+            if (vendedor_novo != canonical_vendor_display(vendedor_atual) or gerente_novo != canonical_manager_display(gerente_atual) or
+                segmento_novo != canonical_segment_display(segmento_atual) or razao_nova != razao_atual or
+                cnpj_novo != cnpj_atual or contato_novo != contato_atual):
                 cur.execute(
                     """
                     UPDATE titulos
-                       SET vendedor = ?, gerente = ?, razao_social = ?, cnpj = ?, contato = ?,
-                           origem_vendedor = CASE WHEN COALESCE(origem_vendedor, '') = '' AND ? != '' THEN 'BASE BI' ELSE origem_vendedor END,
-                           origem_gerente = CASE WHEN COALESCE(origem_gerente, '') = '' AND ? != '' THEN 'BASE BI' ELSE origem_gerente END,
-                           updated_at = ?
+                       SET vendedor = ?, gerente = ?, segmento = ?, razao_social = ?, cnpj = ?, contato = ?,
+                           origem_vendedor = ?, origem_gerente = ?, origem_segmento = ?, updated_at = ?
                      WHERE titulo_id = ?
                     """,
-                    (vendedor_novo, gerente_novo, razao_nova, cnpj_novo, contato_novo,
-                     normalize_text(info.get("vendedor")), normalize_text(info.get("gerente")), now, t["titulo_id"]),
+                    (vendedor_novo, gerente_novo, segmento_novo, razao_nova, cnpj_novo, contato_novo,
+                     origem_vendedor_nova, origem_gerente_nova, origem_segmento_nova,
+                     now, t["titulo_id"]),
                 )
                 titulos_atualizados += 1
 
@@ -1621,8 +1798,9 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
                 base_bi_nao_localizados += 1
             # Vendedor/Gerente devem vir prioritariamente da NF na BASE BI.
             # O cadastro do cliente serve como fallback/manual, mas não deve espalhar um responsável de outra NF.
-            vendedor_cad = str(auto_info.get("vendedor", "") or cad.get("vendedor", "") or "")
-            gerente_cad = str(auto_info.get("gerente", "") or cad.get("gerente", "") or "")
+            vendedor_cad = canonical_vendor_display(auto_info.get("vendedor", "") or cad.get("vendedor", "") or "")
+            gerente_cad = canonical_manager_display(auto_info.get("gerente", "") or cad.get("gerente", "") or "")
+            segmento_cad = canonical_segment_display(auto_info.get("segmento", "") or "")
             obs_cad = str(cad.get("observacao", "") or "")
             razao_cad = str(cad.get("razao_social", "") or auto_info.get("razao_social", "") or "")
             cnpj_cad = str(cad.get("cnpj", "") or auto_info.get("cnpj", "") or "")
@@ -1632,14 +1810,22 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
             upsert_cliente_cadastro(conn, cliente_codigo, loja, nome_cliente, razao_social=razao_cad, cnpj=cnpj_cad, contato=contato_cad)
 
             if tid in existing_ids:
-                cur.execute("SELECT primeira_aparicao, vendedor, gerente, observacao_atual, razao_social, cnpj, contato, origem_vendedor, origem_gerente FROM titulos WHERE titulo_id = ?", (tid,))
+                cur.execute("SELECT primeira_aparicao, vendedor, gerente, segmento, observacao_atual, razao_social, cnpj, contato, origem_vendedor, origem_gerente, origem_segmento FROM titulos WHERE titulo_id = ?", (tid,))
                 old_row = cur.fetchone()
                 first = old_row["primeira_aparicao"]
                 ciclo = calcular_ciclo(first, data_ref)
                 old_vendedor = str(old_row["vendedor"] or "")
                 old_gerente = str(old_row["gerente"] or "")
-                vendedor_final = (vendedor_cad if should_replace_auto_field(old_vendedor, str(old_row["origem_vendedor"] or "")) else old_vendedor)
-                gerente_final = (gerente_cad if should_replace_auto_field(old_gerente, str(old_row["origem_gerente"] or "")) else old_gerente)
+                old_segmento = str(old_row["segmento"] or "")
+                replace_vendedor = should_replace_auto_field(old_vendedor, str(old_row["origem_vendedor"] or ""))
+                replace_gerente = should_replace_auto_field(old_gerente, str(old_row["origem_gerente"] or ""))
+                replace_segmento = should_replace_segment(old_segmento, str(old_row["origem_segmento"] or ""))
+                vendedor_final = vendedor_cad if replace_vendedor else canonical_vendor_display(old_vendedor)
+                gerente_final = gerente_cad if replace_gerente else canonical_manager_display(old_gerente)
+                segmento_final = segmento_cad if replace_segmento else canonical_segment_display(old_segmento)
+                origem_vendedor_final = "BASE BI" if replace_vendedor and normalize_text(auto_info.get("vendedor")) else str(old_row["origem_vendedor"] or "")
+                origem_gerente_final = "BASE BI" if replace_gerente and normalize_text(auto_info.get("gerente")) else str(old_row["origem_gerente"] or "")
+                origem_segmento_final = "BASE BI" if replace_segmento and normalize_text(auto_info.get("segmento")) else str(old_row["origem_segmento"] or "")
                 obs_final = obs_cad or str(old_row["observacao_atual"] or "")
                 razao_final = razao_cad or str(old_row["razao_social"] or "")
                 cnpj_final = cnpj_cad or str(old_row["cnpj"] or "")
@@ -1649,9 +1835,8 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
                     UPDATE titulos
                        SET filial = ?, prefixo = ?, numero_titulo = ?, parcela = ?, tipo = ?,
                            cliente_codigo = ?, loja = ?, nome_cliente = ?, dt_emissao = ?, vencimento = ?,
-                           valor_titulo = ?, saldo_atual = ?, multa = ?, juros = ?, vendedor = ?, gerente = ?, observacao_atual = ?, razao_social = ?, cnpj = ?, contato = ?,
-                           origem_vendedor = CASE WHEN ? != '' AND ? != ? THEN 'BASE BI' ELSE COALESCE(origem_vendedor, '') END,
-                           origem_gerente = CASE WHEN ? != '' AND ? != ? THEN 'BASE BI' ELSE COALESCE(origem_gerente, '') END,
+                           valor_titulo = ?, saldo_atual = ?, multa = ?, juros = ?, vendedor = ?, gerente = ?, segmento = ?, observacao_atual = ?, razao_social = ?, cnpj = ?, contato = ?,
+                           origem_vendedor = ?, origem_gerente = ?, origem_segmento = ?,
                            status = CASE WHEN status = 'Pago' THEN 'Em cobrança' ELSE status END,
                            ultima_aparicao = ?, data_baixa = NULL, ciclo_cobranca = ?, updated_at = ?
                      WHERE titulo_id = ?
@@ -1661,9 +1846,8 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
                         normalize_text(row.get("Parcela")), normalize_text(row.get("Tipo")), cliente_codigo, loja,
                         nome_cliente, row.get("dt_emissao_str"), row.get("vencimento_str"),
                         float(row.get("Vlr.Titulo", 0)), float(row.get("Saldo a receber", 0)), float(row.get("Multa", 0)), float(row.get("Juros", 0)),
-                        vendedor_final, gerente_final, obs_final, razao_final, cnpj_final, contato_final,
-                        normalize_text(auto_info.get("vendedor")), old_vendedor, vendedor_final,
-                        normalize_text(auto_info.get("gerente")), old_gerente, gerente_final,
+                        vendedor_final, gerente_final, segmento_final, obs_final, razao_final, cnpj_final, contato_final,
+                        origem_vendedor_final, origem_gerente_final, origem_segmento_final,
                         data_ref_str, ciclo, now, tid,
                     ),
                 )
@@ -1674,17 +1858,18 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
                     INSERT INTO titulos (
                         titulo_id, filial, prefixo, numero_titulo, parcela, tipo, cliente_codigo, loja,
                         nome_cliente, dt_emissao, vencimento, valor_titulo, saldo_original, saldo_atual,
-                        multa, juros, vendedor, gerente, observacao_atual, razao_social, cnpj, contato,
-                        origem_vendedor, origem_gerente, status, primeira_aparicao, ultima_aparicao, ciclo_cobranca, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        multa, juros, vendedor, gerente, segmento, observacao_atual, razao_social, cnpj, contato,
+                        origem_vendedor, origem_gerente, origem_segmento, status, primeira_aparicao, ultima_aparicao, ciclo_cobranca, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         tid, normalize_text(row.get("Filial")), normalize_text(row.get("Prefixo")), normalize_text(row.get("No. Titulo")),
                         normalize_text(row.get("Parcela")), normalize_text(row.get("Tipo")), cliente_codigo, loja,
                         nome_cliente, row.get("dt_emissao_str"), row.get("vencimento_str"),
                         float(row.get("Vlr.Titulo", 0)), float(row.get("Saldo a receber", 0)), float(row.get("Saldo a receber", 0)),
-                        float(row.get("Multa", 0)), float(row.get("Juros", 0)), vendedor_cad, gerente_cad, obs_cad, razao_cad, cnpj_cad, contato_cad,
+                        float(row.get("Multa", 0)), float(row.get("Juros", 0)), vendedor_cad, gerente_cad, segmento_cad, obs_cad, razao_cad, cnpj_cad, contato_cad,
                         "BASE BI" if normalize_text(auto_info.get("vendedor")) else "", "BASE BI" if normalize_text(auto_info.get("gerente")) else "",
+                        "BASE BI" if normalize_text(auto_info.get("segmento")) else "",
                         STATUS_ATIVO, data_ref_str, data_ref_str, 1, now, now,
                     ),
                 )
@@ -2226,6 +2411,14 @@ def prepare_fila(ref: date) -> pd.DataFrame:
 
     open_df["dias_atraso"] = open_df["vencimento"].apply(lambda x: calcular_dias_atraso(x, ref))
     open_df["ciclo_cobranca"] = open_df["primeira_aparicao"].apply(lambda x: calcular_ciclo(x, ref))
+    open_df["vendedor"] = open_df.get("vendedor", "").apply(canonical_vendor_display)
+    open_df["gerente"] = open_df.get("gerente", "").apply(canonical_manager_display)
+    if "segmento" not in open_df.columns:
+        open_df["segmento"] = ""
+    open_df["segmento"] = open_df["segmento"].apply(canonical_segment_display)
+    open_df["cliente_id"] = open_df.apply(
+        lambda r: make_cliente_id(r.get("cliente_codigo", ""), r.get("loja", ""), r.get("nome_cliente", "")), axis=1
+    )
 
     actions = open_df.apply(
         lambda r: get_action_for_day(int(r["ciclo_cobranca"]), str(r["status"]), r.get("promessa_pagamento"), ref), axis=1
@@ -2250,6 +2443,26 @@ def _join_unique(values: pd.Series, limite: int = 3) -> str:
     if len(vals) > limite:
         return ", ".join(vals[:limite]) + "..."
     return ", ".join(vals)
+
+
+def _single_or_multiple(values: pd.Series, kind: str = "text") -> str:
+    vals = []
+    for raw in values.fillna("").astype(str):
+        if kind == "vendedor":
+            value = canonical_vendor_display(raw)
+        elif kind == "gerente":
+            value = canonical_manager_display(raw)
+        elif kind == "segmento":
+            value = canonical_segment_display(raw)
+        else:
+            value = normalize_text(raw)
+        if value and value not in vals:
+            vals.append(value)
+    if not vals:
+        return ""
+    if len(vals) == 1:
+        return vals[0]
+    return "Vários"
 
 
 def prepare_fila_clientes(ref: date) -> pd.DataFrame:
@@ -2299,8 +2512,9 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
             "descricao_acao": acao["descricao"],
             "responsavel_padrao": acao["responsavel_padrao"],
             "prioridade": int(acao["prioridade"]),
-            "vendedor": _join_unique(grp["vendedor"]),
-            "gerente": _join_unique(grp["gerente"]),
+            "vendedor": _single_or_multiple(grp["vendedor"], "vendedor"),
+            "gerente": _single_or_multiple(grp["gerente"], "gerente"),
+            "segmento": _single_or_multiple(grp["segmento"], "segmento"),
             "tipo_cliente": tipo_cliente,
             "cobrador": cobrador,
             "razao_social": razao_social,
@@ -2324,6 +2538,7 @@ def apply_fila_filters(fila: pd.DataFrame, prefix: str = "fila") -> pd.DataFrame
     resp_filter = st.session_state.get(f"{prefix}_resp", "Todos")
     gerente_filter = st.session_state.get(f"{prefix}_gerente", "Todos")
     vendedor_filter = st.session_state.get(f"{prefix}_vendedor", "Todos")
+    segmento_filter = st.session_state.get(f"{prefix}_segmento", "Todos")
     tipo_cliente_filter = st.session_state.get(f"{prefix}_tipo_cliente", "Todos")
     cobrador_filter = st.session_state.get(f"{prefix}_cobrador", "Todos")
 
@@ -2341,6 +2556,8 @@ def apply_fila_filters(fila: pd.DataFrame, prefix: str = "fila") -> pd.DataFrame
         filtered = filtered[filtered["gerente"].replace("", "Sem gerente") == gerente_filter]
     if vendedor_filter and vendedor_filter != "Todos":
         filtered = filtered[filtered["vendedor"].replace("", "Sem vendedor") == vendedor_filter]
+    if segmento_filter and segmento_filter != "Todos":
+        filtered = filtered[filtered["segmento"].replace("", "Sem segmento") == segmento_filter]
     if tipo_cliente_filter and tipo_cliente_filter != "Todos":
         filtered = filtered[filtered["tipo_cliente"].fillna("Não especial") == tipo_cliente_filter]
     if cobrador_filter and cobrador_filter != "Todos":
@@ -2581,16 +2798,23 @@ elif page == "Dashboard":
 
 
         st.markdown("### Inadimplência por gerente e vendedor")
-        if not fila.empty:
+        tit_resp = prepare_fila(data_ref)
+        if not tit_resp.empty:
             cger, cvend = st.columns(2)
             with cger:
-                g = fila.copy(); g["gerente"] = g["gerente"].replace("", "Sem gerente")
-                g = g.groupby("gerente", as_index=False).agg(Clientes=("cliente_id", "count"), Valor=("saldo_total", "sum")).sort_values("Valor", ascending=False)
+                g = tit_resp.copy()
+                g["gerente"] = g["gerente"].replace("", "Sem gerente")
+                g = g.groupby("gerente", as_index=False).agg(
+                    Clientes=("cliente_id", "nunique"), Valor=("saldo_atual", "sum")
+                ).sort_values("Valor", ascending=False)
                 g["Valor"] = g["Valor"].apply(br_money)
                 st.dataframe(g.rename(columns={"gerente":"Gerente"}), use_container_width=True, hide_index=True)
             with cvend:
-                v = fila.copy(); v["vendedor"] = v["vendedor"].replace("", "Sem vendedor")
-                v = v.groupby("vendedor", as_index=False).agg(Clientes=("cliente_id", "count"), Valor=("saldo_total", "sum")).sort_values("Valor", ascending=False)
+                v = tit_resp.copy()
+                v["vendedor"] = v["vendedor"].replace("", "Sem vendedor")
+                v = v.groupby("vendedor", as_index=False).agg(
+                    Clientes=("cliente_id", "nunique"), Valor=("saldo_atual", "sum")
+                ).sort_values("Valor", ascending=False)
                 v["Valor"] = v["Valor"].apply(br_money)
                 st.dataframe(v.rename(columns={"vendedor":"Vendedor"}), use_container_width=True, hide_index=True)
 
@@ -2612,9 +2836,10 @@ elif page == "Fila por cliente":
         vendedores = ["Todos"] + sorted(fila["vendedor"].replace("", "Sem vendedor").dropna().unique().tolist())
         colf4.selectbox("Gerente", gerentes, key="fila_gerente")
         colf5.selectbox("Vendedor", vendedores, key="fila_vendedor")
-        colf6, colf7 = st.columns(2)
-        colf6.selectbox("Tipo de cliente", ["Todos", "Especial", "Não especial"], key="fila_tipo_cliente")
-        colf7.selectbox("Cobrador", ["Todos"] + sorted(fila["cobrador"].replace("", "Sem cobrador").dropna().unique().tolist()), key="fila_cobrador")
+        colf6, colf7, colf8 = st.columns(3)
+        colf6.selectbox("Segmento", ["Todos"] + sorted(fila["segmento"].replace("", "Sem segmento").dropna().unique().tolist()), key="fila_segmento")
+        colf7.selectbox("Tipo de cliente", ["Todos", "Especial", "Não especial"], key="fila_tipo_cliente")
+        colf8.selectbox("Cobrador", ["Todos"] + sorted(fila["cobrador"].replace("", "Sem cobrador").dropna().unique().tolist()), key="fila_cobrador")
 
         filtered = apply_fila_filters(fila, prefix="fila")
 
@@ -2645,16 +2870,17 @@ elif page == "Fila por cliente":
             st.session_state["cliente_resp"] = st.session_state.get("fila_resp", "Todos")
             st.session_state["cliente_gerente"] = st.session_state.get("fila_gerente", "Todos")
             st.session_state["cliente_vendedor"] = st.session_state.get("fila_vendedor", "Todos")
+            st.session_state["cliente_segmento"] = st.session_state.get("fila_segmento", "Todos")
             st.session_state["_pending_nav_page"] = "Cliente"
             st.rerun()
 
         filtered["Valor total"] = filtered["saldo_total"].apply(br_money)
         filtered["Venc. mais antigo"] = pd.to_datetime(filtered["menor_vencimento"], errors="coerce").dt.strftime("%d/%m/%Y")
         st.dataframe(
-            filtered[["cliente_id", "nome_cliente", "qtd_titulos", "Valor total", "Venc. mais antigo", "maior_dias_atraso", "dia_regua", "acao_do_dia", "vendedor", "gerente"]].rename(columns={
+            filtered[["cliente_id", "nome_cliente", "qtd_titulos", "Valor total", "Venc. mais antigo", "maior_dias_atraso", "dia_regua", "acao_do_dia", "segmento", "vendedor", "gerente"]].rename(columns={
                 "cliente_id": "ID cliente", "nome_cliente": "Cliente", "qtd_titulos": "Títulos",
                 "maior_dias_atraso": "Maior atraso", "dia_regua": "Dia régua", "acao_do_dia": "Ação única do cliente",
-                "vendedor": "Vendedor", "gerente": "Gerente",
+                "segmento": "Segmento", "vendedor": "Vendedor", "gerente": "Gerente",
             }),
             use_container_width=True,
             hide_index=True,
@@ -2674,9 +2900,10 @@ elif page == "Cliente":
         cfilter4, cfilter5 = st.columns(2)
         cfilter4.selectbox("Gerente", ["Todos"] + sorted(fila_clientes["gerente"].replace("", "Sem gerente").dropna().unique().tolist()), key="cliente_gerente")
         cfilter5.selectbox("Vendedor", ["Todos"] + sorted(fila_clientes["vendedor"].replace("", "Sem vendedor").dropna().unique().tolist()), key="cliente_vendedor")
-        cfilter6, cfilter7 = st.columns(2)
-        cfilter6.selectbox("Tipo de cliente", ["Todos", "Especial", "Não especial"], key="cliente_tipo_cliente")
-        cfilter7.selectbox("Cobrador", ["Todos"] + sorted(fila_clientes["cobrador"].replace("", "Sem cobrador").dropna().unique().tolist()), key="cliente_cobrador")
+        cfilter6, cfilter7, cfilter8 = st.columns(3)
+        cfilter6.selectbox("Segmento", ["Todos"] + sorted(fila_clientes["segmento"].replace("", "Sem segmento").dropna().unique().tolist()), key="cliente_segmento")
+        cfilter7.selectbox("Tipo de cliente", ["Todos", "Especial", "Não especial"], key="cliente_tipo_cliente")
+        cfilter8.selectbox("Cobrador", ["Todos"] + sorted(fila_clientes["cobrador"].replace("", "Sem cobrador").dropna().unique().tolist()), key="cliente_cobrador")
 
         options = apply_fila_filters(fila_clientes, prefix="cliente")
         # Segurança extra: garante que cada cliente apareça uma única vez no seletor.
@@ -2741,8 +2968,8 @@ elif page == "Cliente":
             tit_show["Valor"] = tit_show["saldo_atual"].apply(br_money)
             tit_show["Vencimento"] = pd.to_datetime(tit_show["vencimento"], errors="coerce").dt.strftime("%d/%m/%Y")
             st.dataframe(
-                tit_show[["numero_titulo", "parcela", "tipo", "Valor", "Vencimento", "status", "vendedor", "gerente"]].rename(columns={
-                    "numero_titulo": "Título", "parcela": "Parcela", "tipo": "Tipo", "status": "Status", "vendedor": "Vendedor", "gerente": "Gerente",
+                tit_show[["numero_titulo", "parcela", "tipo", "segmento", "Valor", "Vencimento", "status", "vendedor", "gerente"]].rename(columns={
+                    "numero_titulo": "Título", "parcela": "Parcela", "tipo": "Tipo", "segmento": "Segmento", "status": "Status", "vendedor": "Vendedor", "gerente": "Gerente",
                 }),
                 use_container_width=True,
                 hide_index=True,
@@ -2899,7 +3126,7 @@ elif page == "Cliente":
             rel_tit["razao_social"] = str(selected.get("razao_social", "") or "")
             rel_tit["cnpj"] = str(selected.get("cnpj", "") or "")
             rel_tit["contato"] = str(selected.get("contato", "") or "")
-            rel_tit = rel_tit[["nome_cliente", "razao_social", "cnpj", "contato", "tipo_cliente", "cobrador", "numero_titulo", "parcela", "tipo", "vencimento", "valor_titulo", "saldo_atual", "status", "vendedor", "gerente", "primeira_aparicao", "ultima_aparicao", "data_baixa", "observacao_atual"]]
+            rel_tit = rel_tit[["nome_cliente", "razao_social", "cnpj", "contato", "tipo_cliente", "cobrador", "numero_titulo", "parcela", "tipo", "segmento", "vencimento", "valor_titulo", "saldo_atual", "status", "vendedor", "gerente", "primeira_aparicao", "ultima_aparicao", "data_baixa", "observacao_atual"]]
         rel_hist = hist_export.copy()
         if not rel_hist.empty:
             rel_hist = rel_hist.merge(all_titulos_cliente[["titulo_id", "numero_titulo", "parcela", "nome_cliente"]], on="titulo_id", how="left")
@@ -2968,75 +3195,94 @@ elif page == "Agenda":
 
 elif page == "Carteira":
     st.markdown("### Carteira comercial")
-    fila = prepare_fila_clientes(data_ref)
-    if fila.empty:
+    fila_clientes = prepare_fila_clientes(data_ref)
+    tit_resp = prepare_fila(data_ref)
+    if fila_clientes.empty:
         st.warning("Não há títulos em cobrança.")
     else:
-        tab1, tab2, tab3, tab4 = st.tabs(["Gerente", "Vendedor", "Tipo de cliente", "Cobrador"] )
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["Gerente", "Vendedor", "Segmento", "Tipo de cliente", "Cobrador"])
         with tab1:
-            df = fila.copy()
+            df = tit_resp.copy()
             df["gerente"] = df["gerente"].replace("", "Sem gerente")
             g = df.groupby("gerente", as_index=False).agg(
-                Clientes=("cliente_id", "count"),
-                Titulos=("qtd_titulos", "sum"),
-                Valor=("saldo_total", "sum"),
-                Maior_atraso=("maior_dias_atraso", "max"),
+                Clientes=("cliente_id", "nunique"),
+                Titulos=("titulo_id", "nunique"),
+                Valor=("saldo_atual", "sum"),
+                Maior_atraso=("dias_atraso", "max"),
             ).sort_values("Valor", ascending=False)
             g_show = g.copy(); g_show["Valor"] = g_show["Valor"].apply(br_money)
             st.dataframe(g_show.rename(columns={"gerente":"Gerente", "Maior_atraso":"Maior atraso"}), use_container_width=True, hide_index=True)
         with tab2:
-            df = fila.copy()
+            df = tit_resp.copy()
             df["vendedor"] = df["vendedor"].replace("", "Sem vendedor")
             v = df.groupby("vendedor", as_index=False).agg(
-                Clientes=("cliente_id", "count"),
-                Titulos=("qtd_titulos", "sum"),
-                Valor=("saldo_total", "sum"),
-                Maior_atraso=("maior_dias_atraso", "max"),
+                Clientes=("cliente_id", "nunique"),
+                Titulos=("titulo_id", "nunique"),
+                Valor=("saldo_atual", "sum"),
+                Maior_atraso=("dias_atraso", "max"),
             ).sort_values("Valor", ascending=False)
             v_show = v.copy(); v_show["Valor"] = v_show["Valor"].apply(br_money)
             st.dataframe(v_show.rename(columns={"vendedor":"Vendedor", "Maior_atraso":"Maior atraso"}), use_container_width=True, hide_index=True)
         with tab3:
-            df = fila.copy()
+            df = tit_resp.copy()
+            df["segmento"] = df["segmento"].replace("", "Sem segmento")
+            sg = df.groupby("segmento", as_index=False).agg(
+                Clientes=("cliente_id", "nunique"),
+                Titulos=("titulo_id", "nunique"),
+                Valor=("saldo_atual", "sum"),
+                Maior_atraso=("dias_atraso", "max"),
+            ).sort_values("Valor", ascending=False)
+            sg_show = sg.copy(); sg_show["Valor"] = sg_show["Valor"].apply(br_money)
+            st.dataframe(sg_show.rename(columns={"segmento":"Segmento", "Maior_atraso":"Maior atraso"}), use_container_width=True, hide_index=True)
+        with tab4:
+            df = fila_clientes.copy()
             df["tipo_cliente"] = df["tipo_cliente"].fillna("Não especial")
             t = df.groupby("tipo_cliente", as_index=False).agg(Clientes=("cliente_id", "count"), Titulos=("qtd_titulos", "sum"), Valor=("saldo_total", "sum"), Maior_atraso=("maior_dias_atraso", "max")).sort_values("Valor", ascending=False)
             t_show = t.copy(); t_show["Valor"] = t_show["Valor"].apply(br_money)
             st.dataframe(t_show.rename(columns={"tipo_cliente":"Tipo de cliente", "Maior_atraso":"Maior atraso"}), use_container_width=True, hide_index=True)
-        with tab4:
-            df = fila.copy()
+        with tab5:
+            df = fila_clientes.copy()
             df["cobrador"] = df["cobrador"].replace("", "Sem cobrador")
             c = df.groupby("cobrador", as_index=False).agg(Clientes=("cliente_id", "count"), Titulos=("qtd_titulos", "sum"), Valor=("saldo_total", "sum"), Maior_atraso=("maior_dias_atraso", "max")).sort_values("Valor", ascending=False)
             c_show = c.copy(); c_show["Valor"] = c_show["Valor"].apply(br_money)
             st.dataframe(c_show.rename(columns={"cobrador":"Cobrador", "Maior_atraso":"Maior atraso"}), use_container_width=True, hide_index=True)
 
 
-
 elif page == "Relatórios":
     st.markdown("### Relatórios")
-    fila = prepare_fila_clientes(data_ref)
-    if fila.empty:
+    tit_base = prepare_fila(data_ref)
+    clientes_meta = prepare_fila_clientes(data_ref)
+    if tit_base.empty:
         st.warning("Não há títulos em cobrança para gerar relatório.")
     else:
-        base = fila.copy()
-        base["vendedor"] = base["vendedor"].fillna("").replace("", "Sem vendedor")
-        base["gerente"] = base["gerente"].fillna("").replace("", "Sem gerente")
+        meta_cols = [
+            "cliente_codigo", "loja", "nome_cliente", "tipo_cliente", "cobrador",
+            "razao_social", "cnpj", "contato"
+        ]
+        meta = clientes_meta[meta_cols].drop_duplicates(["cliente_codigo", "loja", "nome_cliente"]) if not clientes_meta.empty else pd.DataFrame(columns=meta_cols)
+        base = tit_base.merge(meta, on=["cliente_codigo", "loja", "nome_cliente"], how="left")
+        base["vendedor"] = base["vendedor"].fillna("").apply(canonical_vendor_display).replace("", "Sem vendedor")
+        base["gerente"] = base["gerente"].fillna("").apply(canonical_manager_display).replace("", "Sem gerente")
+        base["segmento"] = base["segmento"].fillna("").apply(canonical_segment_display).replace("", "Sem segmento")
         base["tipo_cliente"] = base["tipo_cliente"].fillna("Não especial").replace("", "Não especial")
         base["cobrador"] = base["cobrador"].fillna("").replace("", "Sem cobrador")
 
         st.markdown("<div class='section-card'>", unsafe_allow_html=True)
         c1, c2, c3 = st.columns(3)
-        modo_rel = c1.selectbox("Agrupar relatório por", ["Vendedor", "Gerente", "Cliente", "Cobrador", "Tipo de cliente"])
+        modo_rel = c1.selectbox("Agrupar relatório por", ["Vendedor", "Gerente", "Segmento", "Cliente", "Cobrador", "Tipo de cliente"])
         ordenacao = c2.selectbox("Ordenar por", ["Maior valor", "Maior atraso", "Cliente A-Z"])
         formato = c3.selectbox("Formato", ["Resumo e títulos", "Somente resumo", "Somente títulos"])
 
         f1, f2, f3 = st.columns(3)
         vendedores_sel = f1.multiselect("Vendedor", sorted(base["vendedor"].dropna().unique().tolist()))
         gerentes_sel = f2.multiselect("Gerente", sorted(base["gerente"].dropna().unique().tolist()))
-        tipos_sel = f3.multiselect("Tipo de cliente", sorted(base["tipo_cliente"].dropna().unique().tolist()))
+        segmentos_sel = f3.multiselect("Segmento", sorted(base["segmento"].dropna().unique().tolist()))
 
         f4, f5, f6 = st.columns(3)
-        cobradores_sel = f4.multiselect("Cobrador", sorted(base["cobrador"].dropna().unique().tolist()))
-        acao_sel = f5.multiselect("Ação do dia", sorted(base["acao_do_dia"].dropna().unique().tolist()))
-        aging_sel = f6.multiselect("Faixa de atraso", ["0-30", "31-60", "61-90", "91-180", "180+"])
+        tipos_sel = f4.multiselect("Tipo de cliente", sorted(base["tipo_cliente"].dropna().unique().tolist()))
+        cobradores_sel = f5.multiselect("Cobrador", sorted(base["cobrador"].dropna().unique().tolist()))
+        acao_sel = f6.multiselect("Ação do dia", sorted(base["acao_do_dia"].dropna().unique().tolist()))
+        aging_sel = st.multiselect("Faixa de atraso", ["0-30", "31-60", "61-90", "91-180", "180+"])
         st.markdown("</div>", unsafe_allow_html=True)
 
         rel = base.copy()
@@ -3044,6 +3290,8 @@ elif page == "Relatórios":
             rel = rel[rel["vendedor"].isin(vendedores_sel)]
         if gerentes_sel:
             rel = rel[rel["gerente"].isin(gerentes_sel)]
+        if segmentos_sel:
+            rel = rel[rel["segmento"].isin(segmentos_sel)]
         if tipos_sel:
             rel = rel[rel["tipo_cliente"].isin(tipos_sel)]
         if cobradores_sel:
@@ -3066,39 +3314,39 @@ elif page == "Relatórios":
                 return "91-180"
             return "180+"
 
-        rel["faixa_atraso"] = rel["maior_dias_atraso"].apply(faixa_atraso)
+        rel["faixa_atraso"] = rel["dias_atraso"].apply(faixa_atraso)
         if aging_sel:
             rel = rel[rel["faixa_atraso"].isin(aging_sel)]
 
         if ordenacao == "Maior valor":
-            rel = rel.sort_values("saldo_total", ascending=False)
+            rel = rel.sort_values("saldo_atual", ascending=False)
         elif ordenacao == "Maior atraso":
-            rel = rel.sort_values("maior_dias_atraso", ascending=False)
+            rel = rel.sort_values("dias_atraso", ascending=False)
         else:
             rel = rel.sort_values("nome_cliente", ascending=True)
 
-        total_valor = float(rel["saldo_total"].sum()) if not rel.empty else 0.0
+        total_valor = float(rel["saldo_atual"].sum()) if not rel.empty else 0.0
         colm1, colm2, colm3, colm4 = st.columns(4)
         colm1.metric("Valor filtrado", br_money(total_valor))
         colm2.metric("Clientes", int(rel["cliente_id"].nunique()) if not rel.empty else 0)
-        colm3.metric("Títulos", int(rel["qtd_titulos"].sum()) if not rel.empty else 0)
-        colm4.metric("Maior atraso", int(rel["maior_dias_atraso"].max()) if not rel.empty else 0)
+        colm3.metric("Títulos", int(rel["titulo_id"].nunique()) if not rel.empty else 0)
+        colm4.metric("Maior atraso", int(rel["dias_atraso"].max()) if not rel.empty else 0)
 
         grupo_col = {
             "Vendedor": "vendedor",
             "Gerente": "gerente",
+            "Segmento": "segmento",
             "Cliente": "nome_cliente",
             "Cobrador": "cobrador",
             "Tipo de cliente": "tipo_cliente",
         }[modo_rel]
 
-        resumo = pd.DataFrame()
         if not rel.empty:
             resumo = rel.groupby(grupo_col, as_index=False).agg(
                 Clientes=("cliente_id", "nunique"),
-                Titulos=("qtd_titulos", "sum"),
-                Valor=("saldo_total", "sum"),
-                Maior_atraso=("maior_dias_atraso", "max"),
+                Titulos=("titulo_id", "nunique"),
+                Valor=("saldo_atual", "sum"),
+                Maior_atraso=("dias_atraso", "max"),
             ).sort_values("Valor", ascending=False)
             resumo_show = resumo.copy()
             resumo_show["Valor"] = resumo_show["Valor"].apply(br_money)
@@ -3106,59 +3354,38 @@ elif page == "Relatórios":
         else:
             resumo_show = pd.DataFrame(columns=[modo_rel, "Clientes", "Titulos", "Valor", "Maior atraso"])
 
-        detalhes = rel[[
-            "nome_cliente", "saldo_total", "qtd_titulos", "maior_dias_atraso", "faixa_atraso",
-            "acao_do_dia", "vendedor", "gerente", "tipo_cliente", "cobrador", "razao_social", "cnpj", "contato", "menor_vencimento"
+        detalhes_export = rel[[
+            "nome_cliente", "cliente_codigo", "loja", "prefixo", "numero_titulo", "parcela", "tipo",
+            "segmento", "vencimento", "valor_titulo", "saldo_atual", "dias_atraso", "faixa_atraso",
+            "acao_do_dia", "vendedor", "gerente", "tipo_cliente", "cobrador", "razao_social", "cnpj",
+            "contato", "status", "observacao_atual"
         ]].copy() if not rel.empty else pd.DataFrame()
-        if not detalhes.empty:
-            detalhes_export = detalhes.copy()
-            detalhes_export["saldo_total"] = detalhes_export["saldo_total"].apply(br_money)
+        if not detalhes_export.empty:
+            detalhes_export["Vencimento"] = pd.to_datetime(detalhes_export["vencimento"], errors="coerce").dt.strftime("%d/%m/%Y")
+            detalhes_export["Valor título"] = detalhes_export["valor_titulo"].apply(br_money)
+            detalhes_export["Saldo em aberto"] = detalhes_export["saldo_atual"].apply(br_money)
             detalhes_export = detalhes_export.rename(columns={
-                "nome_cliente": "Cliente", "saldo_total": "Valor em aberto", "qtd_titulos": "Títulos",
-                "maior_dias_atraso": "Maior atraso", "faixa_atraso": "Faixa de atraso", "acao_do_dia": "Ação do dia",
-                "vendedor": "Vendedor", "gerente": "Gerente", "tipo_cliente": "Tipo de cliente", "cobrador": "Cobrador", "razao_social": "Razão social", "cnpj": "CNPJ", "contato": "Contato",
-                "menor_vencimento": "Menor vencimento"
+                "nome_cliente": "Cliente", "cliente_codigo": "Cód. Cliente", "loja": "Loja", "prefixo": "Prefixo",
+                "numero_titulo": "Título", "parcela": "Parcela", "tipo": "Tipo", "segmento": "Segmento",
+                "dias_atraso": "Dias atraso", "faixa_atraso": "Faixa de atraso", "acao_do_dia": "Ação do dia",
+                "vendedor": "Vendedor", "gerente": "Gerente", "tipo_cliente": "Tipo de cliente", "cobrador": "Cobrador",
+                "razao_social": "Razão social", "cnpj": "CNPJ", "contato": "Contato", "status": "Status",
+                "observacao_atual": "Observação"
             })
-        else:
-            detalhes_export = pd.DataFrame()
+            detalhes_export = detalhes_export.drop(columns=[c for c in ["vencimento", "valor_titulo", "saldo_atual"] if c in detalhes_export.columns])
 
         if formato in ["Resumo e títulos", "Somente resumo"]:
             st.markdown("#### Resumo")
             st.dataframe(resumo_show, use_container_width=True, hide_index=True)
         if formato in ["Resumo e títulos", "Somente títulos"]:
-            st.markdown("#### Clientes/títulos agrupados")
+            st.markdown("#### Títulos detalhados")
             st.dataframe(detalhes_export, use_container_width=True, hide_index=True)
-
-        # Exporta também os títulos detalhados dos clientes filtrados.
-        titulos_export = pd.DataFrame()
-        if not rel.empty:
-            frames = []
-            for _, r in rel.iterrows():
-                tcli = load_titulos_cliente(str(r["cliente_codigo"]), str(r["loja"]), str(r["nome_cliente"]), somente_abertos=True)
-                if not tcli.empty:
-                    frames.append(tcli)
-            if frames:
-                titulos_export = pd.concat(frames, ignore_index=True)
-                keep_cols = [c for c in [
-                    "nome_cliente", "cliente_codigo", "loja", "prefixo", "numero_titulo", "parcela", "tipo", "emissao", "vencimento",
-                    "valor_titulo", "saldo_atual", "dias_atraso", "status", "vendedor", "gerente", "observacao_atual"
-                ] if c in titulos_export.columns]
-                titulos_export = titulos_export[keep_cols]
-                titulos_export = titulos_export.rename(columns={
-                    "nome_cliente": "Cliente", "cliente_codigo": "Cód. Cliente", "loja": "Loja", "prefixo": "Prefixo",
-                    "numero_titulo": "Título", "parcela": "Parcela", "tipo": "Tipo", "emissao": "Emissão", "vencimento": "Vencimento",
-                    "valor_titulo": "Valor título", "saldo_atual": "Saldo em aberto", "dias_atraso": "Dias atraso", "status": "Status",
-                    "vendedor": "Vendedor", "gerente": "Gerente", "observacao_atual": "Observação"
-                })
 
         sheets = {}
         if formato in ["Resumo e títulos", "Somente resumo"]:
             sheets["Resumo"] = resumo_show
         if formato in ["Resumo e títulos", "Somente títulos"]:
-            sheets["Clientes agrupados"] = detalhes_export
-        if not titulos_export.empty:
-            sheets["Titulos detalhados"] = titulos_export
-
+            sheets["Titulos detalhados"] = detalhes_export
         if sheets:
             excel_bytes = safe_to_excel_bytes(sheets)
             st.download_button(
@@ -3320,9 +3547,9 @@ elif page == "Base de títulos":
         df["Baixa"] = pd.to_datetime(df["data_baixa"], errors="coerce").dt.strftime("%d/%m/%Y")
 
         st.dataframe(
-            df[["titulo_id", "filial", "prefixo", "numero_titulo", "parcela", "cliente_codigo", "nome_cliente", "Vencimento", "Valor título", "Saldo atual", "status", "vendedor", "gerente", "Primeira aparição", "Última aparição", "Baixa"]].rename(columns={
+            df[["titulo_id", "filial", "prefixo", "numero_titulo", "parcela", "cliente_codigo", "nome_cliente", "segmento", "Vencimento", "Valor título", "Saldo atual", "status", "vendedor", "gerente", "Primeira aparição", "Última aparição", "Baixa"]].rename(columns={
                 "titulo_id": "ID interno", "filial": "Filial", "prefixo": "Prefixo", "numero_titulo": "Título", "parcela": "Parcela",
-                "cliente_codigo": "Cód. Cliente", "nome_cliente": "Cliente", "status": "Status", "vendedor": "Vendedor", "gerente": "Gerente"
+                "cliente_codigo": "Cód. Cliente", "nome_cliente": "Cliente", "segmento": "Segmento", "status": "Status", "vendedor": "Vendedor", "gerente": "Gerente"
             }),
             use_container_width=True,
             hide_index=True,
