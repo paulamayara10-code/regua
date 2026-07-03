@@ -23,12 +23,17 @@ import sqlite3
 import re
 import html
 import shutil
+import base64
+import json
+import os
+import hashlib
 import zipfile
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from datetime import date, datetime
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
+from urllib.error import HTTPError, URLError
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -36,7 +41,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v3.7"
+APP_VERSION = "v4.1"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -172,9 +177,167 @@ st.markdown(
 # -----------------------------------------------------------------------------
 # Armazenamento e backups
 # -----------------------------------------------------------------------------
-def ensure_storage() -> None:
+def ensure_storage_basic() -> None:
     DATA_DIR.mkdir(exist_ok=True)
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+
+# -----------------------------------------------------------------------------
+# Persistência externa no GitHub (opcional, recomendada para Streamlit Cloud)
+# -----------------------------------------------------------------------------
+def _secret_value(*names: str, default: str = "") -> str:
+    """Busca configuração em st.secrets ou variáveis de ambiente, sem quebrar o app."""
+    for name in names:
+        try:
+            val = st.secrets.get(name, "")
+            if val:
+                return str(val)
+        except Exception:
+            pass
+        val = os.environ.get(name, "")
+        if val:
+            return str(val)
+    return default
+
+
+def github_config() -> Dict[str, str]:
+    """Configuração do cofre de dados no GitHub.
+
+    Secrets esperados no Streamlit:
+    GITHUB_TOKEN = token com permissão Contents: Read and write
+    GITHUB_REPO = "usuario/repositorio"
+    GITHUB_BRANCH = "main"  (opcional)
+    GITHUB_DB_PATH = "dados/crm_cobranca_first.db" (opcional)
+    """
+    token = _secret_value("GITHUB_TOKEN", "GH_TOKEN")
+    repo = _secret_value("GITHUB_REPO", "GH_REPO")
+    branch = _secret_value("GITHUB_BRANCH", "GH_BRANCH", default="main")
+    path = _secret_value("GITHUB_DB_PATH", "GH_DB_PATH", default="dados/crm_cobranca_first.db")
+    enabled = bool(token and repo and path)
+    return {"enabled": enabled, "token": token, "repo": repo, "branch": branch, "path": path}
+
+
+def _github_api_url(cfg: Dict[str, str]) -> str:
+    return f"https://api.github.com/repos/{cfg['repo']}/contents/{cfg['path']}"
+
+
+def _github_request(url: str, token: str, method: str = "GET", data: Optional[dict] = None) -> dict:
+    payload = None
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "crm-cobranca-first",
+    }
+    if data is not None:
+        payload = json.dumps(data).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = Request(url, data=payload, headers=headers, method=method)
+    with urlopen(req, timeout=30) as resp:
+        body = resp.read().decode("utf-8")
+        return json.loads(body) if body else {}
+
+
+def github_get_db() -> Tuple[Optional[bytes], Optional[str], str]:
+    """Baixa o banco remoto. Retorna (bytes, sha, mensagem)."""
+    cfg = github_config()
+    if not cfg["enabled"]:
+        return None, None, "Cofre GitHub não configurado."
+    url = _github_api_url(cfg) + f"?ref={cfg['branch']}"
+    try:
+        info = _github_request(url, cfg["token"], "GET")
+        content = base64.b64decode(info.get("content", "")) if info.get("content") else None
+        return content, info.get("sha"), "Banco remoto encontrado."
+    except HTTPError as e:
+        if e.code == 404:
+            return None, None, "Banco remoto ainda não existe. Será criado no primeiro salvamento."
+        return None, None, f"Erro GitHub {e.code}: não foi possível ler o banco remoto."
+    except Exception as e:
+        return None, None, f"Erro ao acessar GitHub: {e}"
+
+
+def download_db_from_github_if_needed() -> None:
+    """Em ambiente Streamlit, restaura o banco remoto se o arquivo local não existir."""
+    ensure_storage_basic()
+    if DB_PATH.exists():
+        return
+    data, sha, msg = github_get_db()
+    if data:
+        DB_PATH.write_bytes(data)
+        try:
+            st.session_state["github_last_sha"] = sha or ""
+            st.session_state["github_last_sync"] = datetime.now().isoformat(timespec="seconds")
+            st.session_state["github_sync_msg"] = "Banco restaurado do GitHub."
+        except Exception:
+            pass
+
+
+def _db_sha256() -> str:
+    if not DB_PATH.exists():
+        return ""
+    return hashlib.sha256(DB_PATH.read_bytes()).hexdigest()
+
+
+def upload_db_to_github(reason: str = "sincronizacao") -> Tuple[bool, str]:
+    """Envia o banco atual para o GitHub. Não apaga histórico; versiona no commit do GitHub."""
+    cfg = github_config()
+    if not cfg["enabled"]:
+        return False, "Cofre GitHub não configurado."
+    if not DB_PATH.exists():
+        return False, "Banco local não encontrado."
+
+    # Validação antes do envio para não subir arquivo corrompido.
+    try:
+        chk_conn = sqlite3.connect(DB_PATH)
+        chk = chk_conn.execute("PRAGMA integrity_check").fetchone()[0]
+        chk_conn.close()
+        if chk != "ok":
+            return False, f"Banco local inválido: {chk}. Sincronização cancelada."
+    except Exception as e:
+        return False, f"Não foi possível validar o banco local: {e}"
+
+    local_hash = _db_sha256()
+    if st.session_state.get("github_last_hash") == local_hash:
+        return True, "Sem alterações para sincronizar."
+
+    data, current_sha, _ = github_get_db()
+    b64 = base64.b64encode(DB_PATH.read_bytes()).decode("ascii")
+    body = {
+        "message": f"backup CRM cobranca - {reason} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "content": b64,
+        "branch": cfg["branch"],
+    }
+    if current_sha:
+        body["sha"] = current_sha
+
+    try:
+        resp = _github_request(_github_api_url(cfg), cfg["token"], "PUT", body)
+        st.session_state["github_last_hash"] = local_hash
+        st.session_state["github_last_sha"] = resp.get("content", {}).get("sha", "")
+        st.session_state["github_last_sync"] = datetime.now().isoformat(timespec="seconds")
+        st.session_state["github_sync_msg"] = "Banco salvo no GitHub."
+        return True, "Banco salvo no GitHub."
+    except Exception as e:
+        st.session_state["github_sync_msg"] = f"Falha ao salvar no GitHub: {e}"
+        return False, f"Falha ao salvar no GitHub: {e}"
+
+
+def github_status() -> Dict[str, str]:
+    cfg = github_config()
+    if not cfg["enabled"]:
+        return {"status": "não configurado", "repo": "", "path": "", "last_sync": ""}
+    return {
+        "status": "configurado",
+        "repo": cfg["repo"],
+        "path": cfg["path"],
+        "last_sync": st.session_state.get("github_last_sync", ""),
+    }
+
+
+def ensure_storage() -> None:
+    ensure_storage_basic()
+    download_db_from_github_if_needed()
     # Migração automática do banco antigo, caso exista na raiz do app.
     if LEGACY_DB_PATH.exists() and not DB_PATH.exists():
         shutil.copy2(LEGACY_DB_PATH, DB_PATH)
@@ -321,6 +484,10 @@ def get_conn() -> sqlite3.Connection:
 
 
 def init_db() -> None:
+    # Segurança: antes de qualquer migração de estrutura, preserva o banco atual.
+    ensure_storage()
+    if DB_PATH.exists():
+        backup_db("antes_migracao_v4")
     conn = get_conn()
     cur = conn.cursor()
 
@@ -463,6 +630,11 @@ def init_db() -> None:
     ensure_column("titulos", "razao_social", "TEXT DEFAULT ''")
     ensure_column("titulos", "cnpj", "TEXT DEFAULT ''")
     ensure_column("titulos", "contato", "TEXT DEFAULT ''")
+    ensure_column("titulos", "origem_vendedor", "TEXT DEFAULT ''")
+    ensure_column("titulos", "origem_gerente", "TEXT DEFAULT ''")
+    ensure_column("uploads", "base_bi_cruzados", "INTEGER DEFAULT 0")
+    ensure_column("uploads", "base_bi_nao_localizados", "INTEGER DEFAULT 0")
+    ensure_column("uploads", "base_bi_status", "TEXT DEFAULT ''")
 
     cur.execute("SELECT COUNT(*) AS total FROM regua_cobranca")
     if cur.fetchone()["total"] == 0:
@@ -768,86 +940,115 @@ def _digits(value) -> str:
     return re.sub(r"\D+", "", normalize_text(value))
 
 
-def build_faturamento_maps(df_base: pd.DataFrame) -> tuple[dict, dict, dict]:
-    """Cria mapas de cliente a partir da base fixa de faturamento.
+def normalize_note_key(value) -> str:
+    """Normaliza NF/título para cruzamento seguro.
 
-    A leitura é flexível para aceitar planilhas com nomes de colunas diferentes.
-    Chaves usadas: cliente+loja, cliente, CNPJ ou nome do cliente.
+    Trata 00016843, 16843, 16843.0, NF 16843 e 003-000016843-001 como 16843.
+    """
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    txt = normalize_text(value).upper().strip()
+    if not txt:
+        return ""
+    if re.fullmatch(r"\d+(?:[,.]0+)?", txt):
+        txt = re.sub(r"[,.]0+$", "", txt)
+        return (txt.lstrip("0") or "0")
+    nums = re.findall(r"\d+", txt)
+    if not nums:
+        return re.sub(r"[^A-Z0-9]+", "", txt)
+    candidate = max(nums, key=len)
+    return candidate.lstrip("0") or "0"
+
+
+def build_faturamento_maps(df_base: pd.DataFrame) -> tuple[dict, dict, dict, dict]:
+    """Cria mapas para enriquecer vendedor/gerente a partir da BASE BI.
+
+    Prioridade no CRM: 1) Nota Fiscal/Título; 2) Cliente+loja; 3) Código; 4) Nome.
     """
     if df_base.empty:
-        return {}, {}, {}
-    col_cliente = find_col(df_base, ["Cliente", "Cod Cliente", "Código Cliente", "Cod. Cliente", "A1_COD", "Codigo"])
+        return {}, {}, {}, {}
+
+    col_nota = find_col(df_base, [
+        "Nota Fiscal", "NF", "N.F.", "Nº NF", "No NF", "Número NF", "Numero NF",
+        "Nota", "Documento", "No. Titulo", "Nº Título", "Titulo", "Título"
+    ])
+    col_cliente = find_col(df_base, ["CLIENTE", "Cliente", "Cod Cliente", "Código Cliente", "Cod. Cliente", "A1_COD", "Codigo"])
     col_loja = find_col(df_base, ["Loja", "A1_LOJA"])
-    col_nome = find_col(df_base, ["Nome Cliente", "Cliente Nome", "Nome", "Nome Fantasia", "A1_NOME"])
-    col_razao = find_col(df_base, ["Razão Social", "Razao Social", "Nome Razão", "A1_NREDUZ", "Nome Cliente"])
+    col_nome = find_col(df_base, ["NOME DO CLIENTE", "Nome Cliente", "Cliente Nome", "Nome", "Nome Fantasia", "A1_NOME"])
+    col_razao = find_col(df_base, ["Razão Social", "Razao Social", "NOME DO CLIENTE", "Nome Cliente", "A1_NREDUZ"])
     col_cnpj = find_col(df_base, ["CNPJ", "CPF/CNPJ", "CNPJ/CPF", "A1_CGC", "CGC"])
     col_contato = find_col(df_base, ["Contato", "Responsável", "Responsavel", "Contato Financeiro", "Email", "E-mail", "Telefone"])
-    col_vendedor = find_col(df_base, ["Vendedor", "Nome Vendedor", "Representante", "Consultor", "Comercial"])
-    col_gerente = find_col(df_base, ["Gerente", "Gerente Comercial", "Supervisor", "Coordenador"])
+    col_vendedor = find_col(df_base, ["VENDEDOR", "Vendedor", "Nome Vendedor", "Representante", "Consultor", "Comercial"])
+    col_gerente = find_col(df_base, ["GERENTE", "Gerente", "Gerente Comercial", "Supervisor", "Coordenador"])
 
-    by_cliente_loja, by_cliente, by_nome = {}, {}, {}
+    by_nota, by_cliente_loja, by_cliente, by_nome = {}, {}, {}, {}
     for _, r in df_base.iterrows():
-        cliente = normalize_text(r.get(col_cliente, "")) if col_cliente else ""
-        loja = normalize_text(r.get(col_loja, "")) if col_loja else ""
-        nome = normalize_text(r.get(col_nome, "")) if col_nome else ""
         info = {
             "vendedor": normalize_text(r.get(col_vendedor, "")) if col_vendedor else "",
             "gerente": normalize_text(r.get(col_gerente, "")) if col_gerente else "",
             "razao_social": normalize_text(r.get(col_razao, "")) if col_razao else "",
             "cnpj": normalize_text(r.get(col_cnpj, "")) if col_cnpj else "",
             "contato": normalize_text(r.get(col_contato, "")) if col_contato else "",
+            "origem": "BASE BI",
         }
-        if not any(info.values()):
+        if not (info.get("vendedor") or info.get("gerente") or info.get("razao_social")):
             continue
-        if cliente and loja:
+
+        nota_key = normalize_note_key(r.get(col_nota, "")) if col_nota else ""
+        if nota_key and nota_key not in by_nota:
+            by_nota[nota_key] = info
+
+        cliente = normalize_text(r.get(col_cliente, "")) if col_cliente else ""
+        loja = normalize_text(r.get(col_loja, "")) if col_loja else ""
+        nome = normalize_text(r.get(col_nome, "")) if col_nome else ""
+        if cliente and loja and f"{cliente}|{loja}".upper() not in by_cliente_loja:
             by_cliente_loja[f"{cliente}|{loja}".upper()] = info
         if cliente and cliente.upper() not in by_cliente:
             by_cliente[cliente.upper()] = info
-        if nome:
+        if nome and normalize_col_key(nome) not in by_nome:
             by_nome[normalize_col_key(nome)] = info
         cnpj = _digits(info.get("cnpj"))
-        if cnpj:
+        if cnpj and f"CNPJ:{cnpj}" not in by_nome:
             by_nome[f"CNPJ:{cnpj}"] = info
-    return by_cliente_loja, by_cliente, by_nome
+    return by_nota, by_cliente_loja, by_cliente, by_nome
 
 
-def get_faturamento_info_for(row, maps: tuple[dict, dict, dict]) -> dict:
-    by_cliente_loja, by_cliente, by_nome = maps
+def get_faturamento_info_for(row, maps: tuple) -> dict:
+    if not maps:
+        return {}
+    if len(maps) == 4:
+        by_nota, by_cliente_loja, by_cliente, by_nome = maps
+    else:
+        by_cliente_loja, by_cliente, by_nome = maps
+        by_nota = {}
+    nota_key = normalize_note_key(row.get("No. Titulo"))
     cliente = normalize_text(row.get("Cliente"))
     loja = normalize_text(row.get("Loja"))
     nome = normalize_text(row.get("Nome Cliente"))
     return (
-        by_cliente_loja.get(f"{cliente}|{loja}".upper())
+        by_nota.get(nota_key)
+        or by_cliente_loja.get(f"{cliente}|{loja}".upper())
         or by_cliente.get(cliente.upper())
         or by_nome.get(normalize_col_key(nome))
         or {}
     )
 
 
-def load_faturamento_maps_from_github() -> tuple[tuple[dict, dict, dict], str]:
+def load_faturamento_maps_from_github() -> tuple[tuple[dict, dict, dict, dict], str]:
     url = get_config("base_faturamento_github", "")
     if not url.strip():
-        return ({}, {}, {}), ""
+        return ({}, {}, {}, {}), "BASE BI não configurada"
     with urlopen(url.strip(), timeout=35) as response:
         data = response.read()
     df_base = read_excel_any(data)
-    return build_faturamento_maps(df_base), f"{len(df_base)} linha(s) lida(s)"
-
-def normalize_note_key(value) -> str:
-    """Normaliza o número do título/nota para permitir casamento entre relatórios diferentes."""
-    txt = normalize_text(value).upper()
-    if not txt:
-        return ""
-    nums = re.findall(r"\d+", txt)
-    if not nums:
-        return txt.replace(" ", "").replace("-", "")
-    # Em formatos como 003-000016843-001, o número do título é o penúltimo grupo.
-    if len(nums) >= 3 and len(nums[-1]) <= 3:
-        candidate = nums[-2]
-    else:
-        candidate = nums[-1]
-    candidate = candidate.lstrip("0")
-    return candidate or "0"
+    maps = build_faturamento_maps(df_base)
+    notas = len(maps[0]) if maps else 0
+    return maps, f"{len(df_base)} linha(s) lida(s) • {notas} nota(s) mapeada(s)"
 
 
 def parse_legacy_prf_numero(value) -> tuple[str, str, str]:
@@ -1108,7 +1309,7 @@ def get_action_for_day(ciclo: int, status: str, promessa: Optional[str], ref: da
     }
 
 
-def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple[int, int, int, float]:
+def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple[int, int, int, float, int, int, str]:
     backup_db("antes_upload")
     conn = get_conn()
     try:
@@ -1128,6 +1329,8 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
 
         novos = 0
         atualizados = 0
+        base_bi_cruzados = 0
+        base_bi_nao_localizados = 0
 
         for _, row in df.iterrows():
             tid = str(row["titulo_id"])
@@ -1137,6 +1340,10 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
             cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
             cad = cadastro_map.get(cid, {})
             auto_info = get_faturamento_info_for(row, faturamento_maps)
+            if auto_info and (auto_info.get("vendedor") or auto_info.get("gerente")):
+                base_bi_cruzados += 1
+            else:
+                base_bi_nao_localizados += 1
             vendedor_cad = str(cad.get("vendedor", "") or auto_info.get("vendedor", "") or "")
             gerente_cad = str(cad.get("gerente", "") or auto_info.get("gerente", "") or "")
             obs_cad = str(cad.get("observacao", "") or "")
@@ -1213,13 +1420,13 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
         valor_aberto = float(df["Saldo a receber"].sum())
         cur.execute(
             """
-            INSERT INTO uploads (data_referencia, arquivo, qtd_linhas, novos, atualizados, pagos, valor_aberto, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO uploads (data_referencia, arquivo, qtd_linhas, novos, atualizados, pagos, valor_aberto, base_bi_cruzados, base_bi_nao_localizados, base_bi_status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (data_ref_str, arquivo_nome, len(df), novos, atualizados, len(paid_ids), valor_aberto, now),
+            (data_ref_str, arquivo_nome, len(df), novos, atualizados, len(paid_ids), valor_aberto, base_bi_cruzados, base_bi_nao_localizados, faturamento_status, now),
         )
         conn.commit()
-        return novos, atualizados, len(paid_ids), valor_aberto
+        return novos, atualizados, len(paid_ids), valor_aberto, base_bi_cruzados, base_bi_nao_localizados, faturamento_status
     except Exception:
         conn.rollback()
         raise
@@ -1981,13 +2188,17 @@ if page == "Upload diário":
                 help="Antes de salvar o novo upload, o sistema cria backup automático do banco atual."
             )
             if st.button("Atualizar CRM com este relatório", type="primary", use_container_width=True, disabled=not confirmar_update):
-                novos, atualizados, pagos, valor_aberto = process_upload(df_upload, data_ref, str(fonte_arquivo))
+                novos, atualizados, pagos, valor_aberto, base_bi_cruzados, base_bi_nao_localizados, faturamento_status = process_upload(df_upload, data_ref, str(fonte_arquivo))
                 st.success("CRM atualizado com sucesso.")
                 a, b, c, d = st.columns(4)
                 with a: metric_card("Novos", str(novos), "Entraram na régua")
                 with b: metric_card("Mantidos", str(atualizados), "Continuam em aberto")
                 with c: metric_card("Pagos", str(pagos), "Saíram do relatório")
                 with d: metric_card("Valor aberto", br_money(valor_aberto), "Saldo do arquivo")
+                e, f, g = st.columns(3)
+                with e: metric_card("BASE BI", str(base_bi_cruzados), "Títulos com vendedor/gerente localizados")
+                with f: metric_card("Sem cruzamento", str(base_bi_nao_localizados), "Para revisar manualmente")
+                with g: metric_card("Fonte comercial", faturamento_status or "Não configurada", "Cruzamento por número da nota")
                 pacote = export_backup_zip()
                 st.download_button(
                     "Baixar backup do CRM agora",
@@ -2807,6 +3018,14 @@ elif page == "Base de títulos":
         csv = df.to_csv(index=False, sep=";", encoding="utf-8-sig")
         st.download_button("Baixar base filtrada CSV", csv, file_name="base_crm_cobranca.csv", mime="text/csv")
 
+
+
+# Sincronização externa: no Streamlit Cloud o disco local pode reiniciar.
+# Se o cofre GitHub estiver configurado, o banco atual é enviado após cada alteração/rerun.
+try:
+    upload_db_to_github("auto")
+except Exception:
+    pass
 
 st.markdown(
     f"""
