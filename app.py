@@ -41,7 +41,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v4.1"
+APP_VERSION = "v5.0 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -255,6 +255,70 @@ def github_get_db() -> Tuple[Optional[bytes], Optional[str], str]:
         return None, None, f"Erro GitHub {e.code}: não foi possível ler o banco remoto."
     except Exception as e:
         return None, None, f"Erro ao acessar GitHub: {e}"
+
+def github_get_file_bytes(path: str) -> Tuple[Optional[bytes], str]:
+    """Lê um arquivo do repositório configurado nos Secrets do Streamlit.
+
+    Usado para arquivos de apoio, como BASE BI.xlsx. Retorna bytes e mensagem.
+    """
+    cfg = github_config()
+    if not cfg["enabled"]:
+        return None, "GitHub não configurado"
+    original_path = cfg.get("path", "")
+    cfg = dict(cfg)
+    cfg["path"] = path
+    url = _github_api_url(cfg) + f"?ref={cfg['branch']}"
+    try:
+        info = _github_request(url, cfg["token"], "GET")
+        content = base64.b64decode(info.get("content", "")) if info.get("content") else None
+        return content, f"Arquivo encontrado no GitHub: {path}"
+    except HTTPError as e:
+        if e.code == 404:
+            return None, f"Arquivo não encontrado: {path}"
+        return None, f"Erro GitHub {e.code} ao ler {path}"
+    except Exception as e:
+        return None, f"Erro ao ler {path}: {e}"
+
+
+def find_base_bi_bytes() -> Tuple[Optional[bytes], str]:
+    """Localiza automaticamente a BASE BI sem depender de URL raw.
+
+    Ordem:
+    1) arquivo local do repositório;
+    2) caminho salvo em config (URL raw ou caminho no GitHub);
+    3) caminhos comuns no repositório configurado.
+    """
+    local_candidates = [
+        Path("BASE BI.xlsx"), Path("base_faturamento.xlsx"), Path("base_faturamento_protheus.xlsx"),
+        Path("dados/BASE BI.xlsx"), Path("dados/base_faturamento.xlsx"),
+    ]
+    for cand in local_candidates:
+        if cand.exists():
+            return cand.read_bytes(), f"BASE BI local: {cand.as_posix()}"
+
+    configured = get_config("base_faturamento_github", "").strip() if DB_PATH.exists() else ""
+    if configured:
+        if configured.lower().startswith(("http://", "https://")):
+            try:
+                with urlopen(configured, timeout=35) as response:
+                    return response.read(), "BASE BI carregada pela URL configurada"
+            except Exception as e:
+                return None, f"Erro ao ler URL da BASE BI: {e}"
+        data, msg = github_get_file_bytes(configured)
+        if data:
+            return data, msg
+
+    github_candidates = [
+        "BASE BI.xlsx", "base_faturamento.xlsx", "base_faturamento_protheus.xlsx",
+        "dados/BASE BI.xlsx", "dados/base_faturamento.xlsx", "dados/base_faturamento_protheus.xlsx",
+    ]
+    messages = []
+    for cand in github_candidates:
+        data, msg = github_get_file_bytes(cand)
+        messages.append(msg)
+        if data:
+            return data, msg
+    return None, "BASE BI não encontrada. Envie BASE BI.xlsx na raiz do repositório ou na pasta dados/."
 
 
 def download_db_from_github_if_needed() -> None:
@@ -1040,15 +1104,17 @@ def get_faturamento_info_for(row, maps: tuple) -> dict:
 
 
 def load_faturamento_maps_from_github() -> tuple[tuple[dict, dict, dict, dict], str]:
-    url = get_config("base_faturamento_github", "")
-    if not url.strip():
-        return ({}, {}, {}, {}), "BASE BI não configurada"
-    with urlopen(url.strip(), timeout=35) as response:
-        data = response.read()
+    """Carrega a BASE BI automaticamente e cria o mapa Nota Fiscal -> vendedor/gerente.
+
+    Não depende mais de URL raw: procura BASE BI.xlsx na raiz ou em dados/ do repositório.
+    """
+    data, origem = find_base_bi_bytes()
+    if not data:
+        return ({}, {}, {}, {}), origem
     df_base = read_excel_any(data)
     maps = build_faturamento_maps(df_base)
     notas = len(maps[0]) if maps else 0
-    return maps, f"{len(df_base)} linha(s) lida(s) • {notas} nota(s) mapeada(s)"
+    return maps, f"{origem} • {len(df_base)} linha(s) • {notas} nota(s) mapeada(s)"
 
 
 def parse_legacy_prf_numero(value) -> tuple[str, str, str]:
@@ -1321,7 +1387,7 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
         try:
             faturamento_maps, faturamento_status = load_faturamento_maps_from_github()
         except Exception as exc:
-            faturamento_maps, faturamento_status = ({}, {}, {}), f"Erro ao ler base de faturamento: {exc}"
+            faturamento_maps, faturamento_status = ({}, {}, {}, {}), f"Erro ao ler BASE BI: {exc}"
 
         existing = pd.read_sql_query("SELECT titulo_id, status, primeira_aparicao, ultima_aparicao FROM titulos", conn)
         existing_ids = set(existing["titulo_id"].astype(str).tolist()) if not existing.empty else set()
@@ -1765,7 +1831,7 @@ def save_cliente_all(
         cur = conn.execute(
             f"""
             UPDATE titulos
-               SET vendedor = ?, gerente = ?, observacao_atual = ?, updated_at = ?
+               SET vendedor = ?, gerente = ?, observacao_atual = ?, razao_social = ?, cnpj = ?, contato = ?, updated_at = ?
              WHERE {where} AND status != ?
             """,
             [vendedor, gerente, observacao_cliente, razao_social, cnpj, contato, now] + params + [STATUS_PAGO],
@@ -2141,20 +2207,16 @@ if page == "Upload diário":
 
     df_upload = None
     fonte_arquivo = None
-    with st.expander("Base fixa de faturamento para localizar vendedor/gerente", expanded=False):
-        url_atual = get_config("base_faturamento_github", "")
-        url_nova = st.text_input("URL raw da base de faturamento no GitHub", value=url_atual, placeholder="Cole aqui o link raw do XLSX/CSV")
-        cgit1, cgit2 = st.columns(2)
-        if cgit1.button("Salvar base fixa", use_container_width=True):
-            set_config("base_faturamento_github", url_nova)
-            st.success("Base de faturamento salva. Ela será usada nos próximos uploads para sugerir vendedor, gerente e dados cadastrais.")
-        if cgit2.button("Testar leitura", use_container_width=True, disabled=not bool(url_nova.strip())):
-            try:
-                set_config("base_faturamento_github", url_nova)
-                _, status_base = load_faturamento_maps_from_github()
-                st.success(f"Base lida com sucesso: {status_base}.")
-            except Exception as exc:
-                st.error(f"Não consegui ler a base: {exc}")
+
+    with st.container():
+        try:
+            _, status_base = load_faturamento_maps_from_github()
+            if "não encontrada" in status_base.lower() or "não configur" in status_base.lower() or "erro" in status_base.lower():
+                st.warning(status_base)
+            else:
+                st.success(status_base)
+        except Exception as exc:
+            st.warning(f"BASE BI indisponível: {exc}")
 
     uploaded = st.file_uploader("Relatório: Títulos a receber vencidos", type=["xlsx", "xls"])
     if uploaded:
@@ -2878,6 +2940,18 @@ elif page == "Segurança":
     c4.metric("Último backup", health.get("ultimo_backup") or "Sem backup")
 
     st.markdown(backup_status_html(), unsafe_allow_html=True)
+
+    gst = github_status()
+    if gst.get("status") == "configurado":
+        st.success(f"Cofre GitHub ativo: {gst.get('repo')} • {gst.get('path')}")
+        if st.button("Sincronizar banco com GitHub agora", type="primary", use_container_width=True):
+            ok, msg = upload_db_to_github("manual")
+            if ok:
+                st.success(msg)
+            else:
+                st.error(msg)
+    else:
+        st.warning("Cofre GitHub não configurado. Configure os Secrets antes de usar o app em produção.")
 
     st.markdown("#### Restaurar backup")
     restore_file = st.file_uploader("Restaurar pacote do CRM (.zip) ou banco (.db)", type=["zip", "db"])
