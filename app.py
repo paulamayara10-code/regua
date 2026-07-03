@@ -204,36 +204,125 @@ def ensure_storage_basic() -> None:
 # -----------------------------------------------------------------------------
 # Persistência externa no GitHub (opcional, recomendada para Streamlit Cloud)
 # -----------------------------------------------------------------------------
-def _secret_value(*names: str, default: str = "") -> str:
-    """Busca configuração em st.secrets ou variáveis de ambiente, sem quebrar o app."""
-    for name in names:
-        try:
-            val = st.secrets.get(name, "")
+def _clean_secret(value) -> str:
+    """Normaliza valores dos Secrets sem expor credenciais."""
+    if value is None:
+        return ""
+    txt = str(value).strip()
+    # Protege contra aspas coladas manualmente dentro do valor.
+    if len(txt) >= 2 and txt[0] == txt[-1] and txt[0] in {"\"", "'"}:
+        txt = txt[1:-1].strip()
+    return txt
+
+
+def _secret_value(*names: str, default: str = "", nested_names: tuple[str, ...] = ()) -> str:
+    """Busca Secrets em formato simples ou dentro de uma seção [github].
+
+    Aceita, por exemplo:
+    GITHUB_TOKEN = "..."
+
+    ou:
+    [github]
+    token = "..."
+    """
+    candidates = list(names) + list(nested_names)
+
+    try:
+        # 1) Chaves no nível principal (formato recomendado).
+        for name in candidates:
+            for key in (name, name.lower(), name.upper()):
+                try:
+                    val = st.secrets.get(key, "")
+                    val = _clean_secret(val)
+                    if val:
+                        return val
+                except Exception:
+                    pass
+
+        # 2) Chaves dentro de seções TOML, para tolerar [github].
+        for section_name in ("github", "GITHUB", "github_backup", "backup_github"):
+            try:
+                section = st.secrets.get(section_name, {})
+            except Exception:
+                section = {}
+            if not section:
+                continue
+            for name in candidates:
+                simple = name.lower().replace("github_", "").replace("gh_", "")
+                for key in (name, name.lower(), name.upper(), simple):
+                    try:
+                        val = section.get(key, "")
+                        val = _clean_secret(val)
+                        if val:
+                            return val
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    # 3) Variáveis de ambiente como alternativa.
+    for name in candidates:
+        for key in (name, name.upper()):
+            val = _clean_secret(os.environ.get(key, ""))
             if val:
-                return str(val)
-        except Exception:
-            pass
-        val = os.environ.get(name, "")
-        if val:
-            return str(val)
+                return val
     return default
 
 
-def github_config() -> Dict[str, str]:
-    """Configuração do cofre de dados no GitHub.
+def _normalize_github_repo(value: str) -> str:
+    repo = _clean_secret(value).rstrip("/")
+    repo = re.sub(r"^https?://github\.com/", "", repo, flags=re.IGNORECASE)
+    repo = re.sub(r"^git@github\.com:", "", repo, flags=re.IGNORECASE)
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    return repo.strip("/")
 
-    Secrets esperados no Streamlit:
-    GITHUB_TOKEN = token com permissão Contents: Read and write
-    GITHUB_REPO = "usuario/repositorio"
-    GITHUB_BRANCH = "main"  (opcional)
-    GITHUB_DB_PATH = "dados/crm_cobranca_first.db" (opcional)
-    """
-    token = _secret_value("GITHUB_TOKEN", "GH_TOKEN")
-    repo = _secret_value("GITHUB_REPO", "GH_REPO")
-    branch = _secret_value("GITHUB_BRANCH", "GH_BRANCH", default="main")
-    path = _secret_value("GITHUB_DB_PATH", "GH_DB_PATH", default="dados/crm_cobranca_first.db")
-    enabled = bool(token and repo and path)
-    return {"enabled": enabled, "token": token, "repo": repo, "branch": branch, "path": path}
+
+def _normalize_github_db_path(value: str) -> str:
+    path = _clean_secret(value).replace("\\", "/").strip("/")
+    if not path:
+        return "dados/crm_cobranca_first.db"
+    # Compatibilidade com versões antigas que usavam apenas a pasta de backup.
+    if not path.lower().endswith(".db"):
+        path = f"{path}/crm_cobranca_first.db"
+    return path
+
+
+def github_config() -> Dict[str, object]:
+    """Lê a configuração do cofre GitHub e informa exatamente o que falta."""
+    token = _secret_value("GITHUB_TOKEN", "GH_TOKEN", nested_names=("token",))
+    repo = _normalize_github_repo(
+        _secret_value("GITHUB_REPO", "GH_REPO", nested_names=("repo", "repository"))
+    )
+    branch = _secret_value(
+        "GITHUB_BRANCH", "GH_BRANCH", default="main", nested_names=("branch",)
+    ) or "main"
+    raw_path = _secret_value(
+        "GITHUB_DB_PATH", "GH_DB_PATH", "GITHUB_BACKUP_PATH",
+        default="dados/crm_cobranca_first.db",
+        nested_names=("db_path", "path", "backup_path"),
+    )
+    path = _normalize_github_db_path(raw_path)
+
+    missing = []
+    if not token:
+        missing.append("GITHUB_TOKEN")
+    if not repo:
+        missing.append("GITHUB_REPO")
+    if repo and "/" not in repo:
+        missing.append("GITHUB_REPO no formato usuario/repositorio")
+
+    enabled = not missing and bool(path)
+    return {
+        "enabled": enabled,
+        "token": token,
+        "repo": repo,
+        "branch": branch,
+        "path": path,
+        "missing": missing,
+        "token_loaded": bool(token),
+        "repo_loaded": bool(repo),
+    }
 
 
 def _github_api_url(cfg: Dict[str, str]) -> str:
@@ -417,15 +506,26 @@ def upload_db_to_github(reason: str = "sincronizacao") -> Tuple[bool, str]:
         return False, f"Falha ao salvar no GitHub: {e}"
 
 
-def github_status() -> Dict[str, str]:
+def github_status() -> Dict[str, object]:
     cfg = github_config()
     if not cfg["enabled"]:
-        return {"status": "não configurado", "repo": "", "path": "", "last_sync": ""}
+        return {
+            "status": "não configurado",
+            "repo": cfg.get("repo", ""),
+            "path": cfg.get("path", ""),
+            "last_sync": "",
+            "missing": cfg.get("missing", []),
+            "token_loaded": cfg.get("token_loaded", False),
+            "repo_loaded": cfg.get("repo_loaded", False),
+        }
     return {
         "status": "configurado",
         "repo": cfg["repo"],
         "path": cfg["path"],
         "last_sync": st.session_state.get("github_last_sync", ""),
+        "missing": [],
+        "token_loaded": True,
+        "repo_loaded": True,
     }
 
 
@@ -3417,7 +3517,23 @@ elif page == "Segurança":
             else:
                 st.error(msg)
     else:
-        st.warning("Cofre GitHub não configurado. Configure os Secrets antes de usar o app em produção.")
+        faltando = gst.get("missing", [])
+        faltando_txt = ", ".join(str(x) for x in faltando) if faltando else "configuração não reconhecida"
+        st.warning(f"Cofre GitHub não configurado. Verifique: {faltando_txt}.")
+        with st.expander("Diagnóstico dos Secrets", expanded=True):
+            st.write({
+                "GITHUB_TOKEN": "carregado" if gst.get("token_loaded") else "não localizado",
+                "GITHUB_REPO": gst.get("repo") or "não localizado",
+                "GITHUB_DB_PATH": gst.get("path") or "dados/crm_cobranca_first.db",
+            })
+            st.code(
+                'GITHUB_TOKEN = "cole_o_token_sem_espacos"\n'
+                'GITHUB_REPO = "paulamayara10-code/regua"\n'
+                'GITHUB_BRANCH = "main"\n'
+                'GITHUB_DB_PATH = "dados/crm_cobranca_first.db"',
+                language="toml",
+            )
+            st.caption("Salve no painel Secrets deste mesmo app e reinicie o aplicativo.")
 
     st.markdown("#### Restaurar backup")
     restore_file = st.file_uploader("Restaurar pacote do CRM (.zip) ou banco (.db)", type=["zip", "db"])
