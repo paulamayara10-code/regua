@@ -27,6 +27,8 @@ import base64
 import json
 import os
 import hashlib
+import hmac
+import secrets as pysecrets
 import zipfile
 import xml.etree.ElementTree as ET
 import unicodedata
@@ -43,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v5.6 LTS"
+APP_VERSION = "v5.7 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -85,6 +87,9 @@ ACTION_OPTIONS = [
 STATUS_ATIVO = "Em cobrança"
 STATUS_PAGO = "Pago"
 STATUS_PROMESSA = "Aguardando promessa"
+
+PERFIS_USUARIO = ["Administrador", "Operação"]
+SESSION_USER_KEY = "crm_authenticated_user"
 
 
 # -----------------------------------------------------------------------------
@@ -170,6 +175,15 @@ st.markdown(
         .metric-help {min-height: 32px;}
         .footer-first {margin-top: 28px; padding: 18px 8px; color: #667085; text-align:center; font-size: 13px;}
         .footer-first b {color:#0B2341;}
+        input:not([type="password"]), textarea {text-transform: uppercase !important;}
+        input[type="password"] {text-transform: none !important;}
+        .login-shell {max-width: 520px; margin: 4vh auto 0 auto;}
+        .login-card {background: rgba(255,255,255,.97); border:1px solid var(--first-border); border-radius:26px; padding:26px; box-shadow:0 18px 45px rgba(15,39,66,.12);}
+        .login-title {font-size:28px; color:#0B2341; font-weight:900; margin-bottom:6px;}
+        .login-subtitle {color:#667085; margin-bottom:18px;}
+        .user-sidebar-card {background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.22); border-radius:16px; padding:12px 14px; margin-top:14px;}
+        .user-sidebar-card strong {font-size:14px;}
+        .user-sidebar-card span {font-size:12px; opacity:.86;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -811,6 +825,23 @@ def init_db() -> None:
         """
     )
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            usuario TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            nome TEXT NOT NULL,
+            senha_hash TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            perfil TEXT NOT NULL DEFAULT 'Operação',
+            ativo INTEGER NOT NULL DEFAULT 1,
+            ultimo_acesso TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+
     def ensure_column(table: str, column: str, definition: str) -> None:
         cols = [r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()]
         if column not in cols:
@@ -841,6 +872,217 @@ def init_db() -> None:
 
     conn.commit()
     conn.close()
+
+
+# -----------------------------------------------------------------------------
+# Usuários e autenticação
+# -----------------------------------------------------------------------------
+def upper_text(value) -> str:
+    """Padroniza entradas manuais em maiúsculas sem alterar senhas."""
+    if value is None:
+        return ""
+    return str(value).strip().upper()
+
+
+def _password_digest(password: str, salt_hex: str) -> str:
+    salt = bytes.fromhex(salt_hex)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 240_000)
+    return base64.b64encode(digest).decode("ascii")
+
+
+def _new_password_hash(password: str) -> tuple[str, str]:
+    salt_hex = pysecrets.token_hex(16)
+    return salt_hex, _password_digest(password, salt_hex)
+
+
+def count_usuarios() -> int:
+    conn = get_conn()
+    try:
+        return int(conn.execute("SELECT COUNT(*) FROM usuarios").fetchone()[0])
+    finally:
+        conn.close()
+
+
+def create_usuario(nome: str, usuario: str, senha: str, perfil: str = "Operação") -> int:
+    nome = upper_text(nome)
+    usuario = upper_text(usuario)
+    perfil = perfil if perfil in PERFIS_USUARIO else "Operação"
+    if not nome or not usuario:
+        raise ValueError("Informe nome e usuário.")
+    if len(senha or "") < 8:
+        raise ValueError("A senha deve ter pelo menos 8 caracteres.")
+    salt, senha_hash = _new_password_hash(senha)
+    now = datetime.now().isoformat(timespec="seconds")
+    backup_db("antes_criar_usuario")
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO usuarios (usuario, nome, senha_hash, salt, perfil, ativo, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+            """,
+            (usuario, nome, senha_hash, salt, perfil, now, now),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+    except sqlite3.IntegrityError as exc:
+        conn.rollback()
+        raise ValueError("Este usuário já existe.") from exc
+    finally:
+        conn.close()
+
+
+def authenticate_usuario(usuario: str, senha: str) -> Optional[Dict[str, object]]:
+    usuario = upper_text(usuario)
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT id, usuario, nome, senha_hash, salt, perfil, ativo FROM usuarios WHERE usuario = ? COLLATE NOCASE",
+            (usuario,),
+        ).fetchone()
+        if not row or int(row["ativo"] or 0) != 1:
+            return None
+        informed = _password_digest(senha or "", str(row["salt"]))
+        if not hmac.compare_digest(informed, str(row["senha_hash"])):
+            return None
+        now = datetime.now().isoformat(timespec="seconds")
+        conn.execute("UPDATE usuarios SET ultimo_acesso = ?, updated_at = ? WHERE id = ?", (now, now, int(row["id"])))
+        conn.commit()
+        return {
+            "id": int(row["id"]),
+            "usuario": str(row["usuario"]),
+            "nome": str(row["nome"]),
+            "perfil": str(row["perfil"]),
+        }
+    finally:
+        conn.close()
+
+
+def load_usuarios() -> pd.DataFrame:
+    conn = get_conn()
+    try:
+        return pd.read_sql_query(
+            "SELECT id, usuario, nome, perfil, ativo, ultimo_acesso, created_at, updated_at FROM usuarios ORDER BY nome",
+            conn,
+        )
+    finally:
+        conn.close()
+
+
+def update_usuario(usuario_id: int, nome: str, perfil: str, ativo: bool, nova_senha: str = "") -> None:
+    nome = upper_text(nome)
+    perfil = perfil if perfil in PERFIS_USUARIO else "Operação"
+    if not nome:
+        raise ValueError("Informe o nome do usuário.")
+
+    atual = current_user()
+    if atual and int(atual.get("id", 0)) == int(usuario_id) and not ativo:
+        raise ValueError("Você não pode desativar o próprio usuário.")
+
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT perfil FROM usuarios WHERE id = ?", (int(usuario_id),)).fetchone()
+        if not row:
+            raise ValueError("Usuário não encontrado.")
+        if str(row["perfil"]) == "Administrador" and (perfil != "Administrador" or not ativo):
+            admins = int(conn.execute("SELECT COUNT(*) FROM usuarios WHERE perfil = 'Administrador' AND ativo = 1").fetchone()[0])
+            if admins <= 1:
+                raise ValueError("O sistema precisa manter pelo menos um administrador ativo.")
+    finally:
+        conn.close()
+
+    backup_db("antes_alterar_usuario")
+    conn = get_conn()
+    try:
+        now = datetime.now().isoformat(timespec="seconds")
+        if nova_senha:
+            if len(nova_senha) < 8:
+                raise ValueError("A nova senha deve ter pelo menos 8 caracteres.")
+            salt, senha_hash = _new_password_hash(nova_senha)
+            conn.execute(
+                "UPDATE usuarios SET nome = ?, perfil = ?, ativo = ?, senha_hash = ?, salt = ?, updated_at = ? WHERE id = ?",
+                (nome, perfil, 1 if ativo else 0, senha_hash, salt, now, int(usuario_id)),
+            )
+        else:
+            conn.execute(
+                "UPDATE usuarios SET nome = ?, perfil = ?, ativo = ?, updated_at = ? WHERE id = ?",
+                (nome, perfil, 1 if ativo else 0, now, int(usuario_id)),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def current_user() -> Dict[str, object]:
+    value = st.session_state.get(SESSION_USER_KEY, {})
+    return value if isinstance(value, dict) else {}
+
+
+def current_user_name() -> str:
+    return str(current_user().get("nome", "") or "")
+
+
+def is_admin() -> bool:
+    return str(current_user().get("perfil", "")) == "Administrador"
+
+
+def logout_usuario() -> None:
+    st.session_state.pop(SESSION_USER_KEY, None)
+    st.session_state.pop("nav_page", None)
+
+
+def render_auth_gate() -> None:
+    """Exibe criação do primeiro administrador ou tela de login."""
+    if current_user():
+        return
+
+    st.markdown(
+        """
+        <div class="login-shell">
+          <div class="login-card">
+            <div class="login-title">CRM de Cobrança</div>
+            <div class="login-subtitle">Acesso restrito aos usuários autorizados.</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if count_usuarios() == 0:
+        st.info("Primeiro acesso: crie a administradora do CRM. O histórico existente será preservado.")
+        with st.form("primeiro_usuario_admin"):
+            nome = st.text_input("Nome completo", value="PAULA VERISSIMO")
+            usuario = st.text_input("Usuário", value="PAULA")
+            senha = st.text_input("Senha", type="password")
+            confirmar = st.text_input("Confirmar senha", type="password")
+            criar = st.form_submit_button("Criar administradora", type="primary", use_container_width=True)
+        if criar:
+            try:
+                if senha != confirmar:
+                    raise ValueError("As senhas não conferem.")
+                create_usuario(nome, usuario, senha, "Administrador")
+                upload_db_to_github("primeiro_usuario")
+                st.success("Administradora criada. Faça o login.")
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+        st.stop()
+
+    with st.form("login_crm"):
+        usuario = st.text_input("Usuário")
+        senha = st.text_input("Senha", type="password")
+        entrar = st.form_submit_button("Entrar", type="primary", use_container_width=True)
+    if entrar:
+        auth = authenticate_usuario(usuario, senha)
+        if auth:
+            st.session_state[SESSION_USER_KEY] = auth
+            st.rerun()
+        else:
+            st.error("Usuário ou senha inválidos.")
+    st.stop()
 
 
 # -----------------------------------------------------------------------------
@@ -1648,7 +1890,7 @@ def import_legacy_history(df_legacy: pd.DataFrame, data_ref: date, responsavel: 
                     INSERT INTO historico_acoes (titulo_id, data_acao, tipo_acao, responsavel, observacao, created_at)
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (tid, data_ref_str, "Histórico legado", responsavel, obs, now),
+                    (tid, data_ref_str, "Histórico legado", upper_text(responsavel), obs, now),
                 )
                 if atualizar_observacao and not normalize_text(t.get("observacao_atual")):
                     cur.execute(
@@ -2038,7 +2280,7 @@ def update_cliente_meta(cliente_codigo: str, loja: str, nome_cliente: str, tipo_
     upsert_cliente_cadastro(conn, cliente_codigo, loja, nome_cliente, tipo_cliente=tipo_cliente, cobrador=cobrador)
     conn.execute(
         "UPDATE clientes SET tipo_cliente = ?, cobrador = ?, updated_at = ? WHERE cliente_id = ?",
-        (tipo_cliente or "Não especial", cobrador.strip(), now, cid),
+        (tipo_cliente or "Não especial", upper_text(cobrador), now, cid),
     )
     conn.commit()
     conn.close()
@@ -2055,8 +2297,8 @@ def add_agenda_retorno(cliente_codigo: str, loja: str, nome_cliente: str, data_r
     now = datetime.now().isoformat(timespec="seconds")
     cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
     data_iso = data_retorno.isoformat()
-    motivo_limpo = (motivo or "Retorno programado").strip()
-    responsavel_limpo = (responsavel or "Financeiro").strip()
+    motivo_limpo = upper_text(motivo or "Retorno programado")
+    responsavel_limpo = upper_text(responsavel or "Financeiro")
 
     existente = conn.execute(
         """
@@ -2123,7 +2365,7 @@ def update_titulo_fields(titulo_id: str, vendedor: str, gerente: str, observacao
     conn = get_conn()
     conn.execute(
         "UPDATE titulos SET vendedor = ?, gerente = ?, observacao_atual = ?, updated_at = ? WHERE titulo_id = ?",
-        (vendedor.strip(), gerente.strip(), observacao.strip(), datetime.now().isoformat(timespec="seconds"), titulo_id),
+        (upper_text(vendedor), upper_text(gerente), upper_text(observacao), datetime.now().isoformat(timespec="seconds"), titulo_id),
     )
     conn.commit()
     conn.close()
@@ -2166,7 +2408,7 @@ def upsert_cliente_cadastro(conn: sqlite3.Connection, cliente_codigo: str, loja:
             contato = CASE WHEN excluded.contato != '' THEN excluded.contato ELSE COALESCE(clientes.contato, '') END,
             updated_at = excluded.updated_at
         """,
-        (cid, cliente_codigo, loja, nome_cliente, vendedor.strip(), gerente.strip(), (tipo_cliente or "").strip(), cobrador.strip(), observacao.strip(), razao_social.strip(), cnpj.strip(), contato.strip(), now, now),
+        (cid, cliente_codigo, loja, nome_cliente, upper_text(vendedor), upper_text(gerente), (tipo_cliente or "").strip(), upper_text(cobrador), upper_text(observacao), upper_text(razao_social), upper_text(cnpj), upper_text(contato), now, now),
     )
 
 
@@ -2231,7 +2473,7 @@ def update_cliente_fields(cliente_codigo: str, loja: str, nome_cliente: str, ven
                SET vendedor = ?, gerente = ?, observacao_atual = ?, updated_at = ?
              WHERE {where} AND status != ?
             """,
-            [vendedor.strip(), gerente.strip(), observacao.strip(), now] + params + [STATUS_PAGO],
+            [upper_text(vendedor), upper_text(gerente), upper_text(observacao), now] + params + [STATUS_PAGO],
         )
         conn.commit()
         return cur.rowcount
@@ -2251,7 +2493,7 @@ def add_action(titulo_id: str, data_acao: date, tipo: str, responsavel: str, obs
         INSERT INTO historico_acoes (titulo_id, data_acao, tipo_acao, responsavel, observacao, promessa_pagamento, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (titulo_id, data_acao.isoformat(), tipo, responsavel.strip(), observacao.strip(), promessa_str, now),
+        (titulo_id, data_acao.isoformat(), tipo, upper_text(responsavel), upper_text(observacao), promessa_str, now),
     )
     if promessa_str:
         conn.execute(
@@ -2302,15 +2544,15 @@ def save_cliente_all(
         now = datetime.now().isoformat(timespec="seconds")
         cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
         tipo_cliente = (tipo_cliente or "Não especial").strip() or "Não especial"
-        cobrador = (cobrador or "").strip()
-        razao_social = (razao_social or "").strip()
-        cnpj = (cnpj or "").strip()
-        contato = (contato or "").strip()
-        vendedor = (vendedor or "").strip()
-        gerente = (gerente or "").strip()
-        observacao_cliente = (observacao_cliente or "").strip()
-        responsavel_acao = (responsavel_acao or cobrador or "Financeiro").strip()
-        observacao_acao = clean_history_text(observacao_acao or "")
+        cobrador = upper_text(cobrador)
+        razao_social = upper_text(razao_social)
+        cnpj = upper_text(cnpj)
+        contato = upper_text(contato)
+        vendedor = upper_text(vendedor)
+        gerente = upper_text(gerente)
+        observacao_cliente = upper_text(observacao_cliente)
+        responsavel_acao = upper_text(responsavel_acao or cobrador or current_user_name() or "Financeiro")
+        observacao_acao = upper_text(clean_history_text(observacao_acao or ""))
 
         # Cadastro do cliente: grava exatamente o que está na tela.
         conn.execute(
@@ -2382,7 +2624,7 @@ def save_cliente_all(
         agenda_status = "não agendada"
         if agendar_retorno and data_retorno:
             data_iso = data_retorno.isoformat()
-            motivo_limpo = clean_history_text(motivo_retorno or observacao_acao or tipo_acao or "Retorno programado")
+            motivo_limpo = upper_text(clean_history_text(motivo_retorno or observacao_acao or tipo_acao or "Retorno programado"))
             existente = conn.execute(
                 """
                 SELECT id
@@ -2444,7 +2686,7 @@ def add_action_cliente(cliente_codigo: str, loja: str, nome_cliente: str, data_a
             return 0
 
         rows = [
-            (tid, data_acao.isoformat(), tipo, responsavel.strip(), observacao.strip(), promessa_str, now)
+            (tid, data_acao.isoformat(), tipo, upper_text(responsavel), upper_text(observacao), promessa_str, now)
             for tid in titulos["titulo_id"].astype(str).tolist()
         ]
         conn.executemany(
@@ -2487,9 +2729,9 @@ def save_regua(df: pd.DataFrame) -> None:
             continue
         rows.append((
             dia,
-            str(r.get("acao", "")).strip(),
-            str(r.get("descricao", "")).strip(),
-            str(r.get("responsavel_padrao", "Financeiro")).strip(),
+            upper_text(r.get("acao", "")),
+            upper_text(r.get("descricao", "")),
+            upper_text(r.get("responsavel_padrao", "Financeiro")),
             int(r.get("prioridade", 5) or 5),
         ))
     cur.executemany(
@@ -2711,6 +2953,7 @@ def metric_card(label: str, value: str, help_text: str = "", long_text: bool = F
 # App
 # -----------------------------------------------------------------------------
 init_db()
+render_auth_gate()
 
 st.markdown(
     f"""
@@ -2724,6 +2967,8 @@ st.markdown(
 with st.sidebar:
     st.markdown("### Navegação")
     NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Agenda", "Carteira", "Relatórios", "Histórico", "Régua", "Base de títulos", "Segurança"]
+    if is_admin():
+        NAV_OPTIONS.insert(-1, "Usuários")
     if "_pending_nav_page" in st.session_state:
         pending_page = st.session_state.pop("_pending_nav_page")
         if pending_page in NAV_OPTIONS:
@@ -2737,6 +2982,14 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     data_ref = st.date_input("Data de referência", value=date.today(), format="DD/MM/YYYY")
+    usuario_logado = current_user()
+    st.markdown(
+        f"""<div class='user-sidebar-card'><strong>{html.escape(str(usuario_logado.get('nome', '')))}</strong><br><span>{html.escape(str(usuario_logado.get('perfil', '')))}</span></div>""",
+        unsafe_allow_html=True,
+    )
+    if st.button("Sair", key="logout_crm", use_container_width=True):
+        logout_usuario()
+        st.rerun()
     st.markdown("<div class='sidebar-spacer'></div>", unsafe_allow_html=True)
 
 
@@ -3120,7 +3373,7 @@ elif page == "Cliente":
             a1, a2, a3 = st.columns([1.3, 1, 1])
             opcoes_acao = ["Não registrar ação agora"] + ACTION_OPTIONS
             tipo = a1.selectbox("Ação realizada", opcoes_acao, index=0, key=f"tipo_acao_{widget_cliente_key}")
-            responsavel = a2.text_input("Responsável pela ação", value=(cobrador_atual or "Financeiro"), key=f"responsavel_acao_{widget_cliente_key}")
+            responsavel = a2.text_input("Responsável pela ação", value=(current_user_name() or cobrador_atual or "Financeiro"), key=f"responsavel_acao_{widget_cliente_key}")
             data_acao = a3.date_input("Data da ação", value=data_ref, format="DD/MM/YYYY", key=f"data_acao_{widget_cliente_key}")
 
             promessa = None
@@ -3529,6 +3782,83 @@ elif page == "Relatórios":
                 use_container_width=True,
             )
 
+elif page == "Usuários":
+    if not is_admin():
+        st.error("Acesso permitido apenas para administradores.")
+    else:
+        st.markdown("### Usuários")
+        st.caption("Crie acessos individuais e mantenha as senhas protegidas. O histórico existente não é alterado.")
+        tab_novo, tab_gerenciar = st.tabs(["Novo usuário", "Gerenciar usuários"])
+
+        with tab_novo:
+            with st.form("form_novo_usuario"):
+                u1, u2 = st.columns(2)
+                nome_novo = u1.text_input("Nome completo")
+                usuario_novo = u2.text_input("Usuário")
+                u3, u4 = st.columns(2)
+                perfil_novo = u3.selectbox("Perfil", PERFIS_USUARIO, index=1)
+                senha_nova = u4.text_input("Senha inicial", type="password")
+                confirmar_senha = st.text_input("Confirmar senha", type="password")
+                criar_usuario_btn = st.form_submit_button("Criar usuário", type="primary", use_container_width=True)
+            if criar_usuario_btn:
+                try:
+                    if senha_nova != confirmar_senha:
+                        raise ValueError("As senhas não conferem.")
+                    create_usuario(nome_novo, usuario_novo, senha_nova, perfil_novo)
+                    ok_sync, msg_sync = upload_db_to_github("criar_usuario")
+                    st.success("Usuário criado com sucesso." + (" Banco sincronizado." if ok_sync else ""))
+                    if not ok_sync:
+                        st.warning(msg_sync)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+
+        with tab_gerenciar:
+            usuarios_df = load_usuarios()
+            if usuarios_df.empty:
+                st.info("Nenhum usuário cadastrado.")
+            else:
+                show = usuarios_df.copy()
+                show["Status"] = show["ativo"].map({1: "ATIVO", 0: "INATIVO"})
+                show["Último acesso"] = pd.to_datetime(show["ultimo_acesso"], errors="coerce").dt.strftime("%d/%m/%Y %H:%M")
+                st.dataframe(
+                    show[["nome", "usuario", "perfil", "Status", "Último acesso"]].rename(columns={
+                        "nome": "Nome", "usuario": "Usuário", "perfil": "Perfil"
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                labels = [f"{r['nome']} • {r['usuario']}" for _, r in usuarios_df.iterrows()]
+                selecionado_label = st.selectbox("Selecionar usuário", labels)
+                pos = labels.index(selecionado_label)
+                usr = usuarios_df.iloc[pos]
+                with st.form("form_editar_usuario"):
+                    e1, e2 = st.columns(2)
+                    nome_edit = e1.text_input("Nome", value=str(usr["nome"]))
+                    perfil_edit = e2.selectbox(
+                        "Perfil",
+                        PERFIS_USUARIO,
+                        index=PERFIS_USUARIO.index(str(usr["perfil"])) if str(usr["perfil"]) in PERFIS_USUARIO else 1,
+                    )
+                    ativo_edit = st.checkbox("Usuário ativo", value=bool(int(usr["ativo"])))
+                    nova_senha_edit = st.text_input("Nova senha (deixe vazio para manter)", type="password")
+                    salvar_usuario_btn = st.form_submit_button("Salvar usuário", type="primary", use_container_width=True)
+                if salvar_usuario_btn:
+                    try:
+                        update_usuario(int(usr["id"]), nome_edit, perfil_edit, ativo_edit, nova_senha_edit)
+                        ok_sync, msg_sync = upload_db_to_github("alterar_usuario")
+                        if int(usr["id"]) == int(current_user().get("id", 0)):
+                            st.session_state[SESSION_USER_KEY]["nome"] = upper_text(nome_edit)
+                            st.session_state[SESSION_USER_KEY]["perfil"] = perfil_edit
+                        st.success("Usuário atualizado com sucesso." + (" Banco sincronizado." if ok_sync else ""))
+                        if not ok_sync:
+                            st.warning(msg_sync)
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
+
+
 elif page == "Segurança":
     st.markdown("### Segurança dos dados")
     health = db_health()
@@ -3607,7 +3937,7 @@ elif page == "Histórico":
     with st.expander("Importar histórico legado por número da nota", expanded=False):
         st.caption("Use para trazer observações de planilhas antigas e gravar no histórico dos títulos já existentes no CRM.")
         legacy_file = st.file_uploader("Planilha de histórico de cobrança", type=["xlsx", "xls"], key="legacy_history_upload")
-        resp_import = st.text_input("Responsável pela importação", value="Importação legado")
+        resp_import = st.text_input("Responsável pela importação", value=(current_user_name() or "IMPORTAÇÃO LEGADO"))
         atualizar_obs = st.checkbox("Preencher observação atual quando estiver vazia", value=True)
         if legacy_file:
             try:
