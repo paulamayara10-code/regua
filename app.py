@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v5.9 LTS"
+APP_VERSION = "v6.0 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -4114,6 +4114,13 @@ elif page == "Cliente":
         nome_cliente = str(selected["nome_cliente"])
         titulos_cliente = load_titulos_cliente(cliente_codigo, loja, nome_cliente, somente_abertos=True)
 
+        # Ação do dia no topo da tela do cliente.
+        # Fica visível também na impressão/print para que o cliente saia com a orientação de cobrança.
+        st.markdown(
+            f"""<div class="action-suggestion"><b>Próxima ação sugerida:</b> {html.escape(str(selected["acao_do_dia"]))}</div>""",
+            unsafe_allow_html=True,
+        )
+
         c_cliente, c_saldo = st.columns([2.4, 1.1])
         with c_cliente:
             codigo_exibicao = f"{format_identifier(cliente_codigo, 6)}-{format_identifier(loja, 2)}"
@@ -4126,10 +4133,6 @@ elif page == "Cliente":
             metric_card("Títulos", int(selected["qtd_titulos"]), "Quantidade em aberto")
         with c_atraso:
             metric_card("Maior atraso", f"{int(selected['maior_dias_atraso'])} dia(s)", "Maior vencimento em aberto")
-        st.markdown(
-            f"""<div class="screen-only action-suggestion"><b>Próxima ação sugerida:</b> {html.escape(str(selected["acao_do_dia"]))}</div>""",
-            unsafe_allow_html=True,
-        )
 
         st.markdown("#### Títulos abertos do cliente")
         tit_show = titulos_cliente.copy()
