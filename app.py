@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v6.0 LTS"
+APP_VERSION = "v6.1 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -2915,12 +2915,30 @@ def update_titulo_fields(titulo_id: str, vendedor: str, gerente: str, observacao
 
 
 def _cliente_where_clause(cliente_codigo: str, loja: str, nome_cliente: str) -> Tuple[str, List[str]]:
-    """Filtro seguro para localizar todos os títulos do mesmo cliente."""
-    return "cliente_codigo = ? AND loja = ? AND nome_cliente = ?", [cliente_codigo, loja, nome_cliente]
+    """Localiza o mesmo cliente mesmo com zeros à esquerda ou espaços diferentes.
+
+    Exemplos tratados como o mesmo cadastro:
+    - código 4079 e 004079
+    - loja 1 e 01
+    - nomes com diferenças apenas de caixa/espaços nas extremidades
+    """
+    clause = (
+        "LTRIM(TRIM(COALESCE(cliente_codigo, '')), '0') = "
+        "LTRIM(TRIM(COALESCE(?, '')), '0') "
+        "AND LTRIM(TRIM(COALESCE(loja, '')), '0') = "
+        "LTRIM(TRIM(COALESCE(?, '')), '0') "
+        "AND UPPER(TRIM(COALESCE(nome_cliente, ''))) = "
+        "UPPER(TRIM(COALESCE(?, '')))"
+    )
+    return clause, [cliente_codigo, loja, nome_cliente]
 
 
 def make_cliente_id(cliente_codigo: str, loja: str, nome_cliente: str) -> str:
-    return f"{str(cliente_codigo).strip()}|{str(loja).strip()}|{str(nome_cliente).strip()}".upper()
+    """Chave canônica do cliente para evitar duplicidade por formatação."""
+    codigo = format_identifier(cliente_codigo, 6)
+    loja_fmt = format_identifier(loja, 2)
+    nome = upper_text(normalize_text(nome_cliente))
+    return f"{codigo}|{loja_fmt}|{nome}"
 
 
 def load_clientes() -> pd.DataFrame:
@@ -2985,6 +3003,7 @@ def upsert_cliente_cadastro(
     )
 
 def get_cliente_cadastro_map(conn: sqlite3.Connection) -> Dict[str, Dict[str, str]]:
+    """Retorna cadastro usando chave canônica, inclusive para registros antigos."""
     df = pd.read_sql_query(
         """
         SELECT cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente, observacao,
@@ -2996,7 +3015,28 @@ def get_cliente_cadastro_map(conn: sqlite3.Connection) -> Dict[str, Dict[str, st
     )
     if df.empty:
         return {}
-    return df.set_index("cliente_id").to_dict(orient="index")
+    result: Dict[str, Dict[str, str]] = {}
+    for _, row in df.iterrows():
+        key = make_cliente_id(row.get("cliente_codigo", ""), row.get("loja", ""), row.get("nome_cliente", ""))
+        data = row.to_dict()
+        # Em caso de cadastros antigos duplicados, preserva o registro mais completo.
+        current = result.get(key)
+        if current is None:
+            result[key] = data
+            continue
+        current_score = sum(bool(normalize_text(current.get(c, ""))) for c in [
+            "vendedor", "gerente", "observacao", "tipo_cliente", "cobrador",
+            "razao_social", "cnpj", "contato", "nome_fantasia",
+            "telefone_financeiro", "telefone_comercial"
+        ])
+        new_score = sum(bool(normalize_text(data.get(c, ""))) for c in [
+            "vendedor", "gerente", "observacao", "tipo_cliente", "cobrador",
+            "razao_social", "cnpj", "contato", "nome_fantasia",
+            "telefone_financeiro", "telefone_comercial"
+        ])
+        if new_score >= current_score:
+            result[key] = data
+    return result
 
 
 def migrate_clientes_from_titulos() -> int:
@@ -3519,6 +3559,13 @@ def prepare_fila(ref: date) -> pd.DataFrame:
     open_df = df[df["status"] != STATUS_PAGO].copy()
     if open_df.empty:
         return open_df
+
+    # Normaliza a identificação antes de agrupar. Isso impede que o mesmo cliente
+    # apareça duas vezes apenas porque parte dos títulos veio como 4079/1 e outra
+    # parte como 004079/01 após o enriquecimento cadastral.
+    open_df["cliente_codigo"] = open_df["cliente_codigo"].apply(lambda x: format_identifier(x, 6))
+    open_df["loja"] = open_df["loja"].apply(lambda x: format_identifier(x, 2))
+    open_df["nome_cliente"] = open_df["nome_cliente"].apply(lambda x: upper_text(normalize_text(x)))
 
     open_df["dias_atraso"] = open_df["vencimento"].apply(lambda x: calcular_dias_atraso(x, ref))
     open_df["ciclo_cobranca"] = open_df["primeira_aparicao"].apply(lambda x: calcular_ciclo(x, ref))
@@ -4072,8 +4119,9 @@ elif page == "Cliente":
         cfilter8.selectbox("Cobrador", ["Todos"] + sorted(fila_clientes["cobrador"].replace("", "Sem cobrador").dropna().unique().tolist()), key="cliente_cobrador")
 
         options = apply_fila_filters(fila_clientes, prefix="cliente")
-        # Segurança extra: garante que cada cliente apareça uma única vez no seletor.
-        options = options.drop_duplicates(subset=["cliente_codigo", "loja", "nome_cliente"], keep="first").reset_index(drop=True)
+        # Segurança extra: a chave já está normalizada; cada cliente aparece uma única vez,
+        # independentemente da ação individual de cada título.
+        options = options.drop_duplicates(subset=["cliente_id"], keep="first").reset_index(drop=True)
         if options.empty:
             st.warning("Nenhum cliente encontrado com os filtros atuais.")
             st.stop()
