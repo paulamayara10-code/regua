@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v5.7 LTS"
+APP_VERSION = "v5.8 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -177,10 +177,10 @@ st.markdown(
         .footer-first b {color:#0B2341;}
         input:not([type="password"]), textarea {text-transform: uppercase !important;}
         input[type="password"] {text-transform: none !important;}
-        .login-shell {max-width: 520px; margin: 4vh auto 0 auto;}
-        .login-card {background: rgba(255,255,255,.97); border:1px solid var(--first-border); border-radius:26px; padding:26px; box-shadow:0 18px 45px rgba(15,39,66,.12);}
-        .login-title {font-size:28px; color:#0B2341; font-weight:900; margin-bottom:6px;}
-        .login-subtitle {color:#667085; margin-bottom:18px;}
+        .login-shell {max-width: 560px; margin: 4vh auto 0 auto;}
+        .login-card {background: linear-gradient(135deg, #0B2341 0%, #1267A8 72%, #49A8F5 100%); border:1px solid rgba(255,255,255,.22); border-radius:28px; padding:28px; box-shadow:0 22px 55px rgba(11,35,65,.24);}
+        .login-title {font-size:30px; color:#FFFFFF; font-weight:900; margin-bottom:6px;}
+        .login-subtitle {color:rgba(255,255,255,.88); margin-bottom:0;}
         .user-sidebar-card {background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.22); border-radius:16px; padding:12px 14px; margin-top:14px;}
         .user-sidebar-card strong {font-size:14px;}
         .user-sidebar-card span {font-size:12px; opacity:.86;}
@@ -560,6 +560,48 @@ def backup_db(motivo: str = "manual") -> Optional[Path]:
     destino = BACKUP_DIR / f"crm_cobranca_{safe_motivo}_{stamp}.db"
     shutil.copy2(DB_PATH, destino)
     return destino
+
+
+def secure_save_checkpoint(reason: str) -> Dict[str, object]:
+    """Cria uma cópia após o salvamento e sincroniza imediatamente com o GitHub.
+
+    O backup anterior continua existindo para permitir rollback. Este checkpoint
+    adicional preserva exatamente o estado recém-salvo.
+    """
+    local_path = None
+    local_error = ""
+    try:
+        local_path = backup_db(f"apos_{reason}")
+    except Exception as exc:
+        local_error = str(exc)
+
+    github_ok = False
+    github_msg = "Cofre GitHub não configurado."
+    try:
+        github_ok, github_msg = upload_db_to_github(reason)
+    except Exception as exc:
+        github_msg = f"Falha ao sincronizar com GitHub: {exc}"
+
+    result = {
+        "local_ok": bool(local_path),
+        "local_name": local_path.name if local_path else "",
+        "local_error": local_error,
+        "github_ok": bool(github_ok),
+        "github_msg": github_msg,
+    }
+    st.session_state["_secure_save_notice"] = result
+    return result
+
+
+def render_secure_save_notice() -> None:
+    notice = st.session_state.pop("_secure_save_notice", None)
+    if not notice:
+        return
+    local_txt = f"Backup criado: {notice.get('local_name')}" if notice.get("local_ok") else "Backup local não criado"
+    if notice.get("github_ok"):
+        st.success(f"Alterações protegidas. {local_txt}. Banco sincronizado com o GitHub.")
+    else:
+        st.warning(f"Alterações salvas no banco. {local_txt}. {notice.get('github_msg', '')}")
 
 
 def export_backup_zip() -> bytes:
@@ -1041,10 +1083,18 @@ def render_auth_gate() -> None:
 
     st.markdown(
         """
+        <style>
+          [data-testid="stAppViewContainer"] {background: linear-gradient(145deg, #EAF5FF 0%, #F8FBFF 46%, #DDEEFF 100%) !important;}
+          [data-testid="stForm"] {background: linear-gradient(135deg, #0B2341 0%, #1267A8 100%) !important; border: 1px solid rgba(255,255,255,.28) !important; border-radius: 24px !important; padding: 22px !important; box-shadow: 0 20px 48px rgba(11,35,65,.22) !important;}
+          [data-testid="stForm"] label, [data-testid="stForm"] p {color: #FFFFFF !important;}
+          [data-testid="stForm"] input {background: #FFFFFF !important; color: #0B2341 !important;}
+          [data-testid="stForm"] [data-baseweb="select"] > div {background: #FFFFFF !important; color: #0B2341 !important;}
+          [data-testid="stFormSubmitButton"] button {background: #58B3FF !important; color: #0B2341 !important; border: none !important;}
+        </style>
         <div class="login-shell">
           <div class="login-card">
             <div class="login-title">CRM de Cobrança</div>
-            <div class="login-subtitle">Acesso restrito aos usuários autorizados.</div>
+            <div class="login-subtitle">Selecione seu usuário e informe a senha.</div>
           </div>
         </div>
         """,
@@ -1064,19 +1114,32 @@ def render_auth_gate() -> None:
                 if senha != confirmar:
                     raise ValueError("As senhas não conferem.")
                 create_usuario(nome, usuario, senha, "Administrador")
-                upload_db_to_github("primeiro_usuario")
+                secure_save_checkpoint("primeiro_usuario")
                 st.success("Administradora criada. Faça o login.")
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
         st.stop()
 
+    usuarios_login = load_usuarios()
+    usuarios_login = usuarios_login[usuarios_login["ativo"] == 1].copy() if not usuarios_login.empty else usuarios_login
+    opcoes_login = {}
+    for _, row in usuarios_login.iterrows():
+        label = f"{str(row['nome']).strip()} • {str(row['usuario']).strip()}"
+        opcoes_login[label] = str(row["usuario"])
+
     with st.form("login_crm"):
-        usuario = st.text_input("Usuário")
+        label_usuario = st.selectbox(
+            "Selecione o usuário",
+            list(opcoes_login.keys()),
+            index=None,
+            placeholder="Escolha seu acesso",
+        )
         senha = st.text_input("Senha", type="password")
         entrar = st.form_submit_button("Entrar", type="primary", use_container_width=True)
     if entrar:
-        auth = authenticate_usuario(usuario, senha)
+        usuario = opcoes_login.get(label_usuario, "")
+        auth = authenticate_usuario(usuario, senha) if usuario else None
         if auth:
             st.session_state[SESSION_USER_KEY] = auth
             st.rerun()
@@ -2964,6 +3027,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+render_secure_save_notice()
+
 with st.sidebar:
     st.markdown("### Navegação")
     NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Agenda", "Carteira", "Relatórios", "Histórico", "Régua", "Base de títulos", "Segurança"]
@@ -3015,7 +3080,10 @@ if page == "Upload diário":
         if st.button("Aplicar BASE BI nos títulos já existentes", use_container_width=True):
             resultado_bi = aplicar_base_bi_titulos_existentes()
             if resultado_bi.get("ok"):
+                checkpoint_bi = secure_save_checkpoint("aplicar_base_bi")
                 st.success("BASE BI aplicada nos títulos existentes.")
+                if not checkpoint_bi.get("github_ok"):
+                    st.warning(checkpoint_bi.get("github_msg", "Não foi possível sincronizar com o GitHub."))
                 r1, r2, r3, r4 = st.columns(4)
                 r1.metric("Títulos analisados", resultado_bi.get("analisados", 0))
                 r2.metric("Localizados", resultado_bi.get("localizados", 0))
@@ -3060,7 +3128,12 @@ if page == "Upload diário":
             )
             if st.button("Atualizar CRM com este relatório", type="primary", use_container_width=True, disabled=not confirmar_update):
                 novos, atualizados, pagos, valor_aberto, base_bi_cruzados, base_bi_nao_localizados, faturamento_status = process_upload(df_upload, data_ref, str(fonte_arquivo))
+                checkpoint_upload = secure_save_checkpoint("upload_diario")
                 st.success("CRM atualizado com sucesso.")
+                if checkpoint_upload.get("github_ok"):
+                    st.caption("Backup pós-upload criado e banco sincronizado com o GitHub.")
+                else:
+                    st.warning(checkpoint_upload.get("github_msg", "O banco foi salvo localmente, mas não sincronizou com o GitHub."))
                 a, b, c, d = st.columns(4)
                 with a: metric_card("Novos", str(novos), "Entraram na régua")
                 with b: metric_card("Mantidos", str(atualizados), "Continuam em aberto")
@@ -3420,6 +3493,7 @@ elif page == "Cliente":
                     data_retorno=retorno if agendar_retorno else None,
                     motivo_retorno=motivo_retorno,
                 )
+                checkpoint_cliente = secure_save_checkpoint("salvar_cliente")
                 mensagens = [f"Dados salvos em {resultado['titulos_atualizados']} título(s) aberto(s)."]
                 if int(resultado.get("acoes_registradas", 0)):
                     mensagens.append(f"Ação registrada para {resultado['acoes_registradas']} título(s).")
@@ -3543,6 +3617,7 @@ elif page == "Agenda":
                     concluir = st.form_submit_button("Concluir retorno", type="primary")
                     if concluir:
                         concluir_agenda(int(agenda_id))
+                        secure_save_checkpoint("concluir_agenda")
                         st.success("Retorno concluído.")
                         st.rerun()
 
@@ -3805,10 +3880,10 @@ elif page == "Usuários":
                     if senha_nova != confirmar_senha:
                         raise ValueError("As senhas não conferem.")
                     create_usuario(nome_novo, usuario_novo, senha_nova, perfil_novo)
-                    ok_sync, msg_sync = upload_db_to_github("criar_usuario")
-                    st.success("Usuário criado com sucesso." + (" Banco sincronizado." if ok_sync else ""))
-                    if not ok_sync:
-                        st.warning(msg_sync)
+                    checkpoint_usr = secure_save_checkpoint("criar_usuario")
+                    st.success("Usuário criado com sucesso." + (" Banco sincronizado." if checkpoint_usr.get("github_ok") else ""))
+                    if not checkpoint_usr.get("github_ok"):
+                        st.warning(checkpoint_usr.get("github_msg", "Não foi possível sincronizar com o GitHub."))
                     st.rerun()
                 except Exception as exc:
                     st.error(str(exc))
@@ -3847,13 +3922,13 @@ elif page == "Usuários":
                 if salvar_usuario_btn:
                     try:
                         update_usuario(int(usr["id"]), nome_edit, perfil_edit, ativo_edit, nova_senha_edit)
-                        ok_sync, msg_sync = upload_db_to_github("alterar_usuario")
+                        checkpoint_usr = secure_save_checkpoint("alterar_usuario")
                         if int(usr["id"]) == int(current_user().get("id", 0)):
                             st.session_state[SESSION_USER_KEY]["nome"] = upper_text(nome_edit)
                             st.session_state[SESSION_USER_KEY]["perfil"] = perfil_edit
-                        st.success("Usuário atualizado com sucesso." + (" Banco sincronizado." if ok_sync else ""))
-                        if not ok_sync:
-                            st.warning(msg_sync)
+                        st.success("Usuário atualizado com sucesso." + (" Banco sincronizado." if checkpoint_usr.get("github_ok") else ""))
+                        if not checkpoint_usr.get("github_ok"):
+                            st.warning(checkpoint_usr.get("github_msg", "Não foi possível sincronizar com o GitHub."))
                         st.rerun()
                     except Exception as exc:
                         st.error(str(exc))
@@ -3903,6 +3978,7 @@ elif page == "Segurança":
     if st.button("Restaurar backup selecionado", type="primary", use_container_width=True):
         try:
             restored = restore_backup_file(restore_file)
+            secure_save_checkpoint("restaurar_backup")
             st.success(f"Backup restaurado com sucesso: {restored}")
             st.rerun()
         except Exception as exc:
@@ -3954,7 +4030,10 @@ elif page == "Histórico":
                 confirmar_legado = st.checkbox("Conferi a prévia e autorizo importar este histórico", value=False)
                 if st.button("Importar histórico legado", type="primary", use_container_width=True, disabled=not confirmar_legado):
                     result = import_legacy_history(df_legacy, data_ref, resp_import, atualizar_obs)
+                    checkpoint_legado = secure_save_checkpoint("importar_historico")
                     st.success(f"Importação concluída: {result['historicos_inseridos']} registro(s) incluído(s) em {result['titulos_afetados']} título(s).")
+                    if not checkpoint_legado.get("github_ok"):
+                        st.warning(checkpoint_legado.get("github_msg", "O histórico foi salvo localmente, mas não sincronizou com o GitHub."))
                     if result["sem_match_total"]:
                         st.warning(f"{result['sem_match_total']} bloco(s) não encontraram nota correspondente no CRM.")
                         with st.expander("Ver não encontrados", expanded=False):
@@ -4000,7 +4079,9 @@ elif page == "Régua":
         },
     )
     if st.button("Salvar régua", type="primary"):
+        backup_db("antes_salvar_regua")
         save_regua(edited)
+        secure_save_checkpoint("salvar_regua")
         st.success("Régua salva.")
         st.rerun()
 
