@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v5.8 LTS"
+APP_VERSION = "v5.9 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -175,6 +175,16 @@ st.markdown(
         .metric-help {min-height: 32px;}
         .footer-first {margin-top: 28px; padding: 18px 8px; color: #667085; text-align:center; font-size: 13px;}
         .footer-first b {color:#0B2341;}
+        .action-suggestion {
+            background:#EFF8FF; border:1px solid #B2DDFF; border-left:5px solid #1267A8;
+            color:#0B2341; border-radius:16px; padding:12px 15px; margin:10px 0 16px 0;
+            font-size:14px; font-weight:750;
+        }
+        @media print {
+            .screen-only {display:none !important;}
+            [data-testid="stSidebar"], header, footer {display:none !important;}
+            .block-container {padding:0 !important; max-width:none !important;}
+        }
         input:not([type="password"]), textarea {text-transform: uppercase !important;}
         input[type="password"] {text-transform: none !important;}
         .login-shell {max-width: 560px; margin: 4vh auto 0 auto;}
@@ -445,6 +455,86 @@ def find_base_bi_bytes() -> Tuple[Optional[bytes], str]:
         if data:
             return data, msg
     return None, "BASE BI não encontrada. Envie BASE BI.xlsx na raiz do repositório ou na pasta dados/."
+
+
+def _file_name_key(value: str) -> str:
+    txt = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii").lower()
+    return re.sub(r"[^a-z0-9]+", "", txt)
+
+
+def github_list_file_paths(directory: str = "") -> List[str]:
+    """Lista arquivos do repositório configurado sem expor o token."""
+    cfg = github_config()
+    if not cfg.get("enabled"):
+        return []
+    clean_dir = str(directory or "").strip("/")
+    url = f"https://api.github.com/repos/{cfg['repo']}/contents"
+    if clean_dir:
+        url += f"/{clean_dir}"
+    url += f"?ref={cfg['branch']}"
+    try:
+        items = _github_request(url, cfg["token"], "GET")
+        if not isinstance(items, list):
+            return []
+        return [str(item.get("path", "")) for item in items if item.get("type") == "file" and item.get("path")]
+    except Exception:
+        return []
+
+
+def find_relatorio_vendedor_bytes() -> Tuple[Optional[bytes], str]:
+    """Localiza o relatório complementar de inadimplência por vendedor.
+
+    O arquivo é usado somente para completar cadastro/código do cliente e dados
+    cadastrais dos títulos. O histórico do CRM não é alterado.
+    """
+    configured = get_config("base_inadimplencia_vendedor_github", "").strip() if DB_PATH.exists() else ""
+
+    local_paths: List[Path] = []
+    for base_dir in [Path("."), Path("dados")]:
+        if base_dir.exists():
+            local_paths.extend(list(base_dir.glob("*.xlsx")))
+            local_paths.extend(list(base_dir.glob("*.xls")))
+    for cand in local_paths:
+        key = _file_name_key(cand.name)
+        if "inadimplencia" in key and "vendedor" in key and cand.is_file():
+            data = cand.read_bytes()
+            if len(data) >= 200:
+                return data, f"Relatório cadastral local: {cand.as_posix()}"
+
+    if configured:
+        if configured.lower().startswith(("http://", "https://")):
+            try:
+                with urlopen(configured, timeout=35) as response:
+                    data = response.read()
+                if len(data) >= 200:
+                    return data, "Relatório cadastral carregado pela URL configurada"
+            except Exception as exc:
+                return None, f"Erro ao ler relatório cadastral configurado: {exc}"
+        data, msg = github_get_file_bytes(configured)
+        if data and len(data) >= 200:
+            return data, msg
+
+    paths = github_list_file_paths("") + github_list_file_paths("dados")
+    for path in paths:
+        key = _file_name_key(Path(path).name)
+        if "inadimplencia" in key and "vendedor" in key:
+            data, msg = github_get_file_bytes(path)
+            if data and len(data) >= 200:
+                return data, msg
+
+    exact_candidates = [
+        "Inadimplencia por vendedor.xlsx",
+        "inadimplencia_por_vendedor.xlsx",
+        "base_inadimplencia_vendedor.xlsx",
+        "dados/Inadimplencia por vendedor.xlsx",
+        "dados/inadimplencia_por_vendedor.xlsx",
+        "dados/base_inadimplencia_vendedor.xlsx",
+    ]
+    for path in exact_candidates:
+        data, msg = github_get_file_bytes(path)
+        if data and len(data) >= 200:
+            return data, msg
+    return None, "Relatório de inadimplência por vendedor não encontrado."
 
 
 def download_db_from_github_if_needed() -> None:
@@ -894,9 +984,18 @@ def init_db() -> None:
     ensure_column("clientes", "razao_social", "TEXT DEFAULT ''")
     ensure_column("clientes", "cnpj", "TEXT DEFAULT ''")
     ensure_column("clientes", "contato", "TEXT DEFAULT ''")
+    ensure_column("clientes", "nome_fantasia", "TEXT DEFAULT ''")
+    ensure_column("clientes", "telefone_financeiro", "TEXT DEFAULT ''")
+    ensure_column("clientes", "telefone_comercial", "TEXT DEFAULT ''")
     ensure_column("titulos", "razao_social", "TEXT DEFAULT ''")
     ensure_column("titulos", "cnpj", "TEXT DEFAULT ''")
     ensure_column("titulos", "contato", "TEXT DEFAULT ''")
+    ensure_column("titulos", "nome_fantasia", "TEXT DEFAULT ''")
+    ensure_column("titulos", "telefone_financeiro", "TEXT DEFAULT ''")
+    ensure_column("titulos", "telefone_comercial", "TEXT DEFAULT ''")
+    ensure_column("titulos", "vencimento_titulo", "TEXT DEFAULT ''")
+    ensure_column("titulos", "banco_status", "TEXT DEFAULT ''")
+    ensure_column("titulos", "saldo_corrigido", "REAL DEFAULT 0")
     ensure_column("titulos", "origem_vendedor", "TEXT DEFAULT ''")
     ensure_column("titulos", "origem_gerente", "TEXT DEFAULT ''")
     ensure_column("titulos", "segmento", "TEXT DEFAULT ''")
@@ -1586,6 +1685,156 @@ def _safe_amount(value) -> float:
         return 0.0
 
 
+
+def format_identifier(value, width: int = 0) -> str:
+    """Mantém códigos como texto e recompõe zeros à esquerda quando numéricos."""
+    txt = normalize_text(value)
+    if not txt:
+        return ""
+    digits = re.sub(r"\D+", "", txt)
+    if digits and len(digits) == len(re.sub(r"\s+", "", txt)):
+        return digits.zfill(width) if width else digits
+    if re.fullmatch(r"\d+", digits or "") and not re.search(r"[A-Za-z]", txt):
+        return digits.zfill(width) if width else digits
+    return txt.upper()
+
+
+def normalize_parcela_key(value) -> str:
+    txt = normalize_text(value)
+    if not txt:
+        return ""
+    digits = re.sub(r"\D+", "", txt)
+    if digits:
+        return digits.lstrip("0") or "0"
+    return normalize_col_key(txt)
+
+
+def make_title_lookup_key(prefixo, numero, parcela, tipo) -> str:
+    return "|".join([
+        normalize_col_key(prefixo),
+        normalize_note_key(numero),
+        normalize_parcela_key(parcela),
+        normalize_col_key(tipo),
+    ])
+
+
+def make_note_parcela_key(numero, parcela) -> str:
+    return f"{normalize_note_key(numero)}|{normalize_parcela_key(parcela)}"
+
+
+def build_relatorio_vendedor_maps(df_base: pd.DataFrame) -> tuple[dict, dict, dict]:
+    """Mapeia o relatório de inadimplência por vendedor para completar cadastros.
+
+    A chave mais segura é PRF + número + parcela + tipo. Como alternativa,
+    utiliza número + parcela e, somente quando a nota é única, o número da nota.
+    """
+    if df_base.empty:
+        return {}, {}, {}
+
+    col_prefixo = find_col(df_base, ["PRF", "Prefixo", "Prefixo Titulo"])
+    col_numero = find_col(df_base, ["NUMERO", "NÚMERO", "No. Titulo", "Título", "Titulo"])
+    col_parcela = find_col(df_base, ["PARC", "Parcela"])
+    col_tipo = find_col(df_base, ["TIPO", "TP", "Tipo"])
+    col_cliente = find_col(df_base, ["CLIENTE", "Código Cliente", "Codigo Cliente", "Cod Cliente"])
+    col_loja = find_col(df_base, ["LOJA", "Loja"])
+    col_nome = find_col(df_base, ["NOME DO CLIENTE", "Nome Cliente", "Razão Social", "Razao Social", "Nome"])
+    col_fantasia = find_col(df_base, ["N FANTASIA", "Nome Fantasia", "N. Fantasia", "Fantasia"])
+    col_vendedor = find_col(df_base, ["VENDEDOR", "Nome Vendedor", "Vendedor / Representante"])
+    col_gerente = find_col(df_base, ["GERENTE", "Gerente"])
+    col_emissao = find_col(df_base, ["EMISSAO", "EMISSÃO", "Data de Emissao", "Data Emissão"])
+    col_vencimento = find_col(df_base, ["VENCIMENTO", "Vencto Titulo", "Vencto. Título"])
+    col_saldo_corrigido = find_col(df_base, ["SALDO CORR.", "SALDO CORR", "Saldo Corrigido", "Valor Corrigido"])
+    col_banco_status = find_col(df_base, ["Bco St", "BCO ST", "Banco Status", "Status Banco"])
+    col_tel_fin = find_col(df_base, ["Tel. Fin.", "Telefone Financeiro", "Tel Financeiro", "Fone Financeiro"])
+    col_tel_com = find_col(df_base, ["Tel. Com.", "Telefone Comercial", "Tel Comercial", "Fone Comercial"])
+
+    if not col_numero:
+        return {}, {}, {}
+
+    exact: dict[str, dict] = {}
+    by_note_parcela: dict[str, dict] = {}
+    note_values: dict[str, list[dict]] = defaultdict(list)
+
+    for _, row in df_base.iterrows():
+        numero = row.get(col_numero, "")
+        note_key = normalize_note_key(numero)
+        if not note_key:
+            continue
+        cliente_codigo = format_identifier(row.get(col_cliente, ""), 6) if col_cliente else ""
+        loja = format_identifier(row.get(col_loja, ""), 2) if col_loja else ""
+        nome = upper_text(row.get(col_nome, "")) if col_nome else ""
+        fantasia = upper_text(row.get(col_fantasia, "")) if col_fantasia else ""
+        info = {
+            "cliente_codigo": cliente_codigo,
+            "loja": loja,
+            "razao_social": nome,
+            "nome_fantasia": fantasia,
+            "vendedor": canonical_vendor_display(row.get(col_vendedor, "")) if col_vendedor else "",
+            "gerente": canonical_manager_display(row.get(col_gerente, "")) if col_gerente else "",
+            "dt_emissao": to_date_str(row.get(col_emissao, "")) if col_emissao else "",
+            "vencimento_titulo": to_date_str(row.get(col_vencimento, "")) if col_vencimento else "",
+            "saldo_corrigido": _safe_amount(row.get(col_saldo_corrigido, 0)) if col_saldo_corrigido else 0.0,
+            "banco_status": upper_text(row.get(col_banco_status, "")) if col_banco_status else "",
+            "telefone_financeiro": upper_text(row.get(col_tel_fin, "")) if col_tel_fin else "",
+            "telefone_comercial": upper_text(row.get(col_tel_com, "")) if col_tel_com else "",
+            "origem": "RELATÓRIO POR VENDEDOR",
+        }
+        exact_key = make_title_lookup_key(
+            row.get(col_prefixo, "") if col_prefixo else "",
+            numero,
+            row.get(col_parcela, "") if col_parcela else "",
+            row.get(col_tipo, "") if col_tipo else "",
+        )
+        note_parcela_key = make_note_parcela_key(
+            numero,
+            row.get(col_parcela, "") if col_parcela else "",
+        )
+        exact.setdefault(exact_key, info)
+        by_note_parcela.setdefault(note_parcela_key, info)
+        note_values[note_key].append(info)
+
+    unique_note: dict[str, dict] = {}
+    for note_key, values in note_values.items():
+        signatures = {
+            (
+                v.get("cliente_codigo", ""), v.get("loja", ""), v.get("razao_social", ""),
+                v.get("vendedor", ""), v.get("gerente", "")
+            )
+            for v in values
+        }
+        if len(signatures) == 1:
+            unique_note[note_key] = values[0]
+    return exact, by_note_parcela, unique_note
+
+
+def get_relatorio_vendedor_info_for(row, maps: tuple[dict, dict, dict]) -> dict:
+    if not maps:
+        return {}
+    exact, by_note_parcela, unique_note = maps
+    exact_key = make_title_lookup_key(
+        row.get("Prefixo", row.get("prefixo", "")),
+        row.get("No. Titulo", row.get("numero_titulo", "")),
+        row.get("Parcela", row.get("parcela", "")),
+        row.get("Tipo", row.get("tipo", "")),
+    )
+    note_parcela_key = make_note_parcela_key(
+        row.get("No. Titulo", row.get("numero_titulo", "")),
+        row.get("Parcela", row.get("parcela", "")),
+    )
+    note_key = normalize_note_key(row.get("No. Titulo", row.get("numero_titulo", "")))
+    return exact.get(exact_key) or by_note_parcela.get(note_parcela_key) or unique_note.get(note_key) or {}
+
+
+def load_relatorio_vendedor_maps() -> tuple[tuple[dict, dict, dict], str]:
+    data, origem = find_relatorio_vendedor_bytes()
+    if not data:
+        return ({}, {}, {}), origem
+    df_base = read_excel_any(data)
+    maps = build_relatorio_vendedor_maps(df_base)
+    mapped = len(maps[0]) if maps else 0
+    return maps, f"{origem} • {len(df_base)} linha(s) • {mapped} título(s) mapeado(s)"
+
+
 def build_faturamento_maps(df_base: pd.DataFrame) -> tuple[dict, dict, dict, dict]:
     """Cria mapas da BASE BI com uma única combinação por NF/segmento.
 
@@ -2166,6 +2415,144 @@ def aplicar_base_bi_titulos_existentes() -> Dict[str, object]:
     finally:
         conn.close()
 
+
+def aplicar_relatorio_vendedor_titulos_existentes() -> Dict[str, object]:
+    """Completa código/loja/razão social e cadastro usando o relatório por vendedor.
+
+    A operação é retroativa, transacional e não altera histórico de cobrança.
+    Vendedor e gerente só são usados quando os campos do título estão vazios.
+    """
+    backup_db("antes_aplicar_relatorio_vendedor")
+    try:
+        maps, status_base = load_relatorio_vendedor_maps()
+    except Exception as exc:
+        return {"ok": False, "mensagem": f"Erro ao ler relatório por vendedor: {exc}", "analisados": 0, "localizados": 0, "titulos_atualizados": 0, "clientes_atualizados": 0, "sem_match": []}
+
+    if not any(maps):
+        return {"ok": False, "mensagem": status_base, "analisados": 0, "localizados": 0, "titulos_atualizados": 0, "clientes_atualizados": 0, "sem_match": []}
+
+    conn = get_conn()
+    try:
+        titulos = pd.read_sql_query(
+            """
+            SELECT titulo_id, prefixo, numero_titulo, parcela, tipo, cliente_codigo, loja, nome_cliente,
+                   vendedor, gerente, razao_social, cnpj, contato, nome_fantasia,
+                   telefone_financeiro, telefone_comercial, vencimento_titulo,
+                   banco_status, saldo_corrigido, origem_vendedor, origem_gerente, status
+              FROM titulos
+             WHERE status != ?
+            """,
+            conn,
+            params=[STATUS_PAGO],
+        )
+        if titulos.empty:
+            return {"ok": True, "mensagem": "Não há títulos em aberto para atualizar.", "analisados": 0, "localizados": 0, "titulos_atualizados": 0, "clientes_atualizados": 0, "sem_match": []}
+
+        cad_map = get_cliente_cadastro_map(conn)
+        now = datetime.now().isoformat(timespec="seconds")
+        cur = conn.cursor()
+        localizados = 0
+        atualizados = 0
+        clientes_ids = set()
+        sem_match = []
+
+        for _, t in titulos.iterrows():
+            info = get_relatorio_vendedor_info_for(t, maps)
+            if not info:
+                if len(sem_match) < 80:
+                    sem_match.append(f"{normalize_text(t.get('numero_titulo'))} • {normalize_text(t.get('nome_cliente'))}")
+                continue
+            localizados += 1
+
+            old_code = normalize_text(t.get("cliente_codigo"))
+            old_loja = normalize_text(t.get("loja"))
+            nome_cliente = upper_text(t.get("nome_cliente"))
+            new_code = info.get("cliente_codigo") or format_identifier(old_code, 6)
+            new_loja = info.get("loja") or format_identifier(old_loja, 2)
+
+            old_cid = make_cliente_id(old_code, old_loja, nome_cliente)
+            new_cid = make_cliente_id(new_code, new_loja, nome_cliente)
+            cad = cad_map.get(new_cid) or cad_map.get(old_cid) or {}
+
+            vendedor_atual = canonical_vendor_display(t.get("vendedor"))
+            gerente_atual = canonical_manager_display(t.get("gerente"))
+            vendedor_novo = vendedor_atual or canonical_vendor_display(info.get("vendedor"))
+            gerente_novo = gerente_atual or canonical_manager_display(info.get("gerente"))
+            origem_vendedor = normalize_text(t.get("origem_vendedor")) or ("RELATÓRIO POR VENDEDOR" if not vendedor_atual and vendedor_novo else "")
+            origem_gerente = normalize_text(t.get("origem_gerente")) or ("RELATÓRIO POR VENDEDOR" if not gerente_atual and gerente_novo else "")
+
+            razao = normalize_text(t.get("razao_social")) or normalize_text(info.get("razao_social")) or normalize_text(cad.get("razao_social"))
+            fantasia = normalize_text(t.get("nome_fantasia")) or normalize_text(info.get("nome_fantasia")) or normalize_text(cad.get("nome_fantasia")) or nome_cliente
+            cnpj = normalize_text(t.get("cnpj")) or normalize_text(cad.get("cnpj"))
+            contato = normalize_text(t.get("contato")) or normalize_text(cad.get("contato"))
+            tel_fin = normalize_text(t.get("telefone_financeiro")) or normalize_text(info.get("telefone_financeiro")) or normalize_text(cad.get("telefone_financeiro"))
+            tel_com = normalize_text(t.get("telefone_comercial")) or normalize_text(info.get("telefone_comercial")) or normalize_text(cad.get("telefone_comercial"))
+            venc_titulo = normalize_text(t.get("vencimento_titulo")) or normalize_text(info.get("vencimento_titulo"))
+            banco_status = normalize_text(t.get("banco_status")) or normalize_text(info.get("banco_status"))
+            saldo_corrigido_atual = float(t.get("saldo_corrigido") or 0)
+            saldo_corrigido = saldo_corrigido_atual or float(info.get("saldo_corrigido") or 0)
+
+            changed = any([
+                new_code != old_code, new_loja != old_loja,
+                vendedor_novo != vendedor_atual, gerente_novo != gerente_atual,
+                razao != normalize_text(t.get("razao_social")),
+                fantasia != normalize_text(t.get("nome_fantasia")),
+                tel_fin != normalize_text(t.get("telefone_financeiro")),
+                tel_com != normalize_text(t.get("telefone_comercial")),
+                venc_titulo != normalize_text(t.get("vencimento_titulo")),
+                banco_status != normalize_text(t.get("banco_status")),
+                saldo_corrigido != saldo_corrigido_atual,
+            ])
+            if changed:
+                cur.execute(
+                    """
+                    UPDATE titulos
+                       SET cliente_codigo = ?, loja = ?, vendedor = ?, gerente = ?, razao_social = ?, cnpj = ?, contato = ?,
+                           nome_fantasia = ?, telefone_financeiro = ?, telefone_comercial = ?, vencimento_titulo = ?,
+                           banco_status = ?, saldo_corrigido = ?, origem_vendedor = ?, origem_gerente = ?, updated_at = ?
+                     WHERE titulo_id = ?
+                    """,
+                    (new_code, new_loja, vendedor_novo, gerente_novo, razao, cnpj, contato, fantasia,
+                     tel_fin, tel_com, venc_titulo, banco_status, saldo_corrigido,
+                     origem_vendedor, origem_gerente, now, t["titulo_id"]),
+                )
+                atualizados += 1
+
+            upsert_cliente_cadastro(
+                conn,
+                new_code,
+                new_loja,
+                nome_cliente,
+                vendedor=normalize_text(cad.get("vendedor")),
+                gerente=normalize_text(cad.get("gerente")),
+                observacao=normalize_text(cad.get("observacao")),
+                tipo_cliente=normalize_text(cad.get("tipo_cliente")),
+                cobrador=normalize_text(cad.get("cobrador")),
+                razao_social=razao,
+                cnpj=cnpj,
+                contato=contato,
+                nome_fantasia=fantasia,
+                telefone_financeiro=tel_fin,
+                telefone_comercial=tel_com,
+            )
+            clientes_ids.add(new_cid)
+
+        conn.commit()
+        return {
+            "ok": True,
+            "mensagem": status_base,
+            "analisados": len(titulos),
+            "localizados": localizados,
+            "titulos_atualizados": atualizados,
+            "clientes_atualizados": len(clientes_ids),
+            "sem_match": sem_match,
+        }
+    except Exception as exc:
+        conn.rollback()
+        return {"ok": False, "mensagem": f"Erro ao aplicar relatório por vendedor: {exc}", "analisados": 0, "localizados": 0, "titulos_atualizados": 0, "clientes_atualizados": 0, "sem_match": []}
+    finally:
+        conn.close()
+
 def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple[int, int, int, float, int, int, str]:
     backup_db("antes_upload")
     conn = get_conn()
@@ -2175,10 +2562,20 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
         data_ref_str = data_ref.isoformat()
         current_ids = set(df["titulo_id"].astype(str).tolist())
         cadastro_map = get_cliente_cadastro_map(conn)
+        cad_by_name = {}
+        for cid_key, cad_info in cadastro_map.items():
+            name_key = normalize_col_key(cad_info.get("nome_cliente", ""))
+            if name_key and name_key not in cad_by_name:
+                cad_by_name[name_key] = cad_info
+
         try:
             faturamento_maps, faturamento_status = load_faturamento_maps_from_github()
         except Exception as exc:
             faturamento_maps, faturamento_status = ({}, {}, {}, {}), f"Erro ao ler BASE BI: {exc}"
+        try:
+            rel_vendedor_maps, rel_vendedor_status = load_relatorio_vendedor_maps()
+        except Exception as exc:
+            rel_vendedor_maps, rel_vendedor_status = ({}, {}, {}), f"Erro ao ler relatório por vendedor: {exc}"
 
         existing = pd.read_sql_query("SELECT titulo_id, status, primeira_aparicao, ultima_aparicao FROM titulos", conn)
         existing_ids = set(existing["titulo_id"].astype(str).tolist()) if not existing.empty else set()
@@ -2191,32 +2588,90 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
 
         for _, row in df.iterrows():
             tid = str(row["titulo_id"])
-            cliente_codigo = normalize_text(row.get("Cliente"))
-            loja = normalize_text(row.get("Loja"))
-            nome_cliente = normalize_text(row.get("Nome Cliente"))
-            cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
-            cad = cadastro_map.get(cid, {})
+            raw_code = normalize_text(row.get("Cliente"))
+            raw_loja = normalize_text(row.get("Loja"))
+            nome_cliente = upper_text(row.get("Nome Cliente"))
+
             auto_info = get_faturamento_info_for(row, faturamento_maps)
+            cad_info = get_relatorio_vendedor_info_for(row, rel_vendedor_maps)
+
+            cliente_codigo = cad_info.get("cliente_codigo") or format_identifier(raw_code, 6)
+            loja = cad_info.get("loja") or format_identifier(raw_loja, 2)
+            cid_final = make_cliente_id(cliente_codigo, loja, nome_cliente)
+            cid_raw = make_cliente_id(raw_code, raw_loja, nome_cliente)
+            cad = (
+                cadastro_map.get(cid_final)
+                or cadastro_map.get(cid_raw)
+                or cad_by_name.get(normalize_col_key(nome_cliente))
+                or {}
+            )
+
             if auto_info and (auto_info.get("vendedor") or auto_info.get("gerente")):
                 base_bi_cruzados += 1
             else:
                 base_bi_nao_localizados += 1
-            # Vendedor/Gerente devem vir prioritariamente da NF na BASE BI.
-            # O cadastro do cliente serve como fallback/manual, mas não deve espalhar um responsável de outra NF.
-            vendedor_cad = canonical_vendor_display(auto_info.get("vendedor", "") or cad.get("vendedor", "") or "")
-            gerente_cad = canonical_manager_display(auto_info.get("gerente", "") or cad.get("gerente", "") or "")
+
+            # Comercial: NF/segmento da BASE BI; relatório por vendedor como fallback;
+            # cadastro manual do cliente somente quando as duas bases não trouxerem responsável.
+            vendedor_cad = canonical_vendor_display(
+                auto_info.get("vendedor", "") or cad_info.get("vendedor", "") or cad.get("vendedor", "") or ""
+            )
+            gerente_cad = canonical_manager_display(
+                auto_info.get("gerente", "") or cad_info.get("gerente", "") or cad.get("gerente", "") or ""
+            )
             segmento_cad = canonical_segment_display(auto_info.get("segmento", "") or "")
             obs_cad = str(cad.get("observacao", "") or "")
-            razao_cad = str(cad.get("razao_social", "") or auto_info.get("razao_social", "") or "")
-            cnpj_cad = str(cad.get("cnpj", "") or auto_info.get("cnpj", "") or "")
-            contato_cad = str(cad.get("contato", "") or auto_info.get("contato", "") or "")
-            # Mantém cadastro do cliente para dados gerais, mas NÃO grava vendedor/gerente automáticos no cliente.
-            # Isso evita que um cliente com várias NFs/segmentos herde o responsável de outra nota.
-            upsert_cliente_cadastro(conn, cliente_codigo, loja, nome_cliente, razao_social=razao_cad, cnpj=cnpj_cad, contato=contato_cad)
+
+            razao_cad = upper_text(
+                cad.get("razao_social", "")
+                or cad_info.get("razao_social", "")
+                or auto_info.get("razao_social", "")
+                or nome_cliente
+            )
+            nome_fantasia_cad = upper_text(
+                cad.get("nome_fantasia", "")
+                or cad_info.get("nome_fantasia", "")
+                or nome_cliente
+            )
+            cnpj_cad = upper_text(cad.get("cnpj", "") or auto_info.get("cnpj", "") or "")
+            contato_cad = upper_text(cad.get("contato", "") or auto_info.get("contato", "") or "")
+            tel_fin_cad = upper_text(cad.get("telefone_financeiro", "") or cad_info.get("telefone_financeiro", "") or "")
+            tel_com_cad = upper_text(cad.get("telefone_comercial", "") or cad_info.get("telefone_comercial", "") or "")
+            venc_titulo_cad = normalize_text(cad_info.get("vencimento_titulo", "") or row.get("vencimento_str") or "")
+            banco_status_cad = upper_text(cad_info.get("banco_status", "") or "")
+            saldo_corrigido_cad = float(cad_info.get("saldo_corrigido", 0) or 0)
+            if saldo_corrigido_cad <= 0:
+                saldo_corrigido_cad = float(row.get("Saldo a receber", 0) or 0) + float(row.get("Multa", 0) or 0) + float(row.get("Juros", 0) or 0)
+
+            upsert_cliente_cadastro(
+                conn,
+                cliente_codigo,
+                loja,
+                nome_cliente,
+                razao_social=razao_cad,
+                cnpj=cnpj_cad,
+                contato=contato_cad,
+                nome_fantasia=nome_fantasia_cad,
+                telefone_financeiro=tel_fin_cad,
+                telefone_comercial=tel_com_cad,
+                observacao=obs_cad,
+                tipo_cliente=normalize_text(cad.get("tipo_cliente", "")),
+                cobrador=normalize_text(cad.get("cobrador", "")),
+                vendedor=normalize_text(cad.get("vendedor", "")),
+                gerente=normalize_text(cad.get("gerente", "")),
+            )
 
             if tid in existing_ids:
-                cur.execute("SELECT primeira_aparicao, vendedor, gerente, segmento, observacao_atual, razao_social, cnpj, contato, origem_vendedor, origem_gerente, origem_segmento FROM titulos WHERE titulo_id = ?", (tid,))
-                old_row = cur.fetchone()
+                old_row = cur.execute(
+                    """
+                    SELECT primeira_aparicao, vendedor, gerente, segmento, observacao_atual,
+                           razao_social, cnpj, contato, nome_fantasia, telefone_financeiro,
+                           telefone_comercial, vencimento_titulo, banco_status, saldo_corrigido,
+                           origem_vendedor, origem_gerente, origem_segmento
+                      FROM titulos WHERE titulo_id = ?
+                    """,
+                    (tid,),
+                ).fetchone()
                 first = old_row["primeira_aparicao"]
                 ciclo = calcular_ciclo(first, data_ref)
                 old_vendedor = str(old_row["vendedor"] or "")
@@ -2225,22 +2680,37 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
                 replace_vendedor = should_replace_auto_field(old_vendedor, str(old_row["origem_vendedor"] or ""))
                 replace_gerente = should_replace_auto_field(old_gerente, str(old_row["origem_gerente"] or ""))
                 replace_segmento = should_replace_segment(old_segmento, str(old_row["origem_segmento"] or ""))
+
                 vendedor_final = vendedor_cad if replace_vendedor else canonical_vendor_display(old_vendedor)
                 gerente_final = gerente_cad if replace_gerente else canonical_manager_display(old_gerente)
                 segmento_final = segmento_cad if replace_segmento else canonical_segment_display(old_segmento)
-                origem_vendedor_final = "BASE BI" if replace_vendedor and normalize_text(auto_info.get("vendedor")) else str(old_row["origem_vendedor"] or "")
-                origem_gerente_final = "BASE BI" if replace_gerente and normalize_text(auto_info.get("gerente")) else str(old_row["origem_gerente"] or "")
+
+                source_vendor = "BASE BI" if normalize_text(auto_info.get("vendedor")) else ("RELATÓRIO POR VENDEDOR" if normalize_text(cad_info.get("vendedor")) else "")
+                source_manager = "BASE BI" if normalize_text(auto_info.get("gerente")) else ("RELATÓRIO POR VENDEDOR" if normalize_text(cad_info.get("gerente")) else "")
+                origem_vendedor_final = source_vendor if replace_vendedor and vendedor_final else str(old_row["origem_vendedor"] or "")
+                origem_gerente_final = source_manager if replace_gerente and gerente_final else str(old_row["origem_gerente"] or "")
                 origem_segmento_final = "BASE BI" if replace_segmento and normalize_text(auto_info.get("segmento")) else str(old_row["origem_segmento"] or "")
+
                 obs_final = obs_cad or str(old_row["observacao_atual"] or "")
-                razao_final = razao_cad or str(old_row["razao_social"] or "")
-                cnpj_final = cnpj_cad or str(old_row["cnpj"] or "")
-                contato_final = contato_cad or str(old_row["contato"] or "")
+                razao_final = str(old_row["razao_social"] or "") or razao_cad
+                cnpj_final = str(old_row["cnpj"] or "") or cnpj_cad
+                contato_final = str(old_row["contato"] or "") or contato_cad
+                fantasia_final = str(old_row["nome_fantasia"] or "") or nome_fantasia_cad
+                tel_fin_final = str(old_row["telefone_financeiro"] or "") or tel_fin_cad
+                tel_com_final = str(old_row["telefone_comercial"] or "") or tel_com_cad
+                venc_titulo_final = str(old_row["vencimento_titulo"] or "") or venc_titulo_cad
+                banco_status_final = str(old_row["banco_status"] or "") or banco_status_cad
+                saldo_corrigido_final = float(old_row["saldo_corrigido"] or 0) or saldo_corrigido_cad
+
                 cur.execute(
                     """
                     UPDATE titulos
                        SET filial = ?, prefixo = ?, numero_titulo = ?, parcela = ?, tipo = ?,
                            cliente_codigo = ?, loja = ?, nome_cliente = ?, dt_emissao = ?, vencimento = ?,
-                           valor_titulo = ?, saldo_atual = ?, multa = ?, juros = ?, vendedor = ?, gerente = ?, segmento = ?, observacao_atual = ?, razao_social = ?, cnpj = ?, contato = ?,
+                           vencimento_titulo = ?, valor_titulo = ?, saldo_atual = ?, multa = ?, juros = ?,
+                           saldo_corrigido = ?, banco_status = ?, vendedor = ?, gerente = ?, segmento = ?,
+                           observacao_atual = ?, razao_social = ?, cnpj = ?, contato = ?, nome_fantasia = ?,
+                           telefone_financeiro = ?, telefone_comercial = ?,
                            origem_vendedor = ?, origem_gerente = ?, origem_segmento = ?,
                            status = CASE WHEN status = 'Pago' THEN 'Em cobrança' ELSE status END,
                            ultima_aparicao = ?, data_baixa = NULL, ciclo_cobranca = ?, updated_at = ?
@@ -2249,32 +2719,39 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
                     (
                         normalize_text(row.get("Filial")), normalize_text(row.get("Prefixo")), normalize_text(row.get("No. Titulo")),
                         normalize_text(row.get("Parcela")), normalize_text(row.get("Tipo")), cliente_codigo, loja,
-                        nome_cliente, row.get("dt_emissao_str"), row.get("vencimento_str"),
-                        float(row.get("Vlr.Titulo", 0)), float(row.get("Saldo a receber", 0)), float(row.get("Multa", 0)), float(row.get("Juros", 0)),
-                        vendedor_final, gerente_final, segmento_final, obs_final, razao_final, cnpj_final, contato_final,
+                        nome_cliente, row.get("dt_emissao_str"), row.get("vencimento_str"), venc_titulo_final,
+                        float(row.get("Vlr.Titulo", 0)), float(row.get("Saldo a receber", 0)),
+                        float(row.get("Multa", 0)), float(row.get("Juros", 0)), saldo_corrigido_final,
+                        banco_status_final, vendedor_final, gerente_final, segmento_final, obs_final,
+                        razao_final, cnpj_final, contato_final, fantasia_final, tel_fin_final, tel_com_final,
                         origem_vendedor_final, origem_gerente_final, origem_segmento_final,
                         data_ref_str, ciclo, now, tid,
                     ),
                 )
                 atualizados += 1
             else:
+                source_vendor = "BASE BI" if normalize_text(auto_info.get("vendedor")) else ("RELATÓRIO POR VENDEDOR" if normalize_text(cad_info.get("vendedor")) else "")
+                source_manager = "BASE BI" if normalize_text(auto_info.get("gerente")) else ("RELATÓRIO POR VENDEDOR" if normalize_text(cad_info.get("gerente")) else "")
                 cur.execute(
                     """
                     INSERT INTO titulos (
                         titulo_id, filial, prefixo, numero_titulo, parcela, tipo, cliente_codigo, loja,
-                        nome_cliente, dt_emissao, vencimento, valor_titulo, saldo_original, saldo_atual,
-                        multa, juros, vendedor, gerente, segmento, observacao_atual, razao_social, cnpj, contato,
-                        origem_vendedor, origem_gerente, origem_segmento, status, primeira_aparicao, ultima_aparicao, ciclo_cobranca, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        nome_cliente, dt_emissao, vencimento, vencimento_titulo, valor_titulo, saldo_original,
+                        saldo_atual, multa, juros, saldo_corrigido, banco_status, vendedor, gerente, segmento,
+                        observacao_atual, razao_social, cnpj, contato, nome_fantasia, telefone_financeiro,
+                        telefone_comercial, origem_vendedor, origem_gerente, origem_segmento, status,
+                        primeira_aparicao, ultima_aparicao, ciclo_cobranca, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         tid, normalize_text(row.get("Filial")), normalize_text(row.get("Prefixo")), normalize_text(row.get("No. Titulo")),
                         normalize_text(row.get("Parcela")), normalize_text(row.get("Tipo")), cliente_codigo, loja,
-                        nome_cliente, row.get("dt_emissao_str"), row.get("vencimento_str"),
-                        float(row.get("Vlr.Titulo", 0)), float(row.get("Saldo a receber", 0)), float(row.get("Saldo a receber", 0)),
-                        float(row.get("Multa", 0)), float(row.get("Juros", 0)), vendedor_cad, gerente_cad, segmento_cad, obs_cad, razao_cad, cnpj_cad, contato_cad,
-                        "BASE BI" if normalize_text(auto_info.get("vendedor")) else "", "BASE BI" if normalize_text(auto_info.get("gerente")) else "",
-                        "BASE BI" if normalize_text(auto_info.get("segmento")) else "",
+                        nome_cliente, row.get("dt_emissao_str"), row.get("vencimento_str"), venc_titulo_cad,
+                        float(row.get("Vlr.Titulo", 0)), float(row.get("Saldo a receber", 0)),
+                        float(row.get("Saldo a receber", 0)), float(row.get("Multa", 0)), float(row.get("Juros", 0)),
+                        saldo_corrigido_cad, banco_status_cad, vendedor_cad, gerente_cad, segmento_cad, obs_cad,
+                        razao_cad, cnpj_cad, contato_cad, nome_fantasia_cad, tel_fin_cad, tel_com_cad,
+                        source_vendor, source_manager, "BASE BI" if normalize_text(auto_info.get("segmento")) else "",
                         STATUS_ATIVO, data_ref_str, data_ref_str, 1, now, now,
                     ),
                 )
@@ -2296,15 +2773,16 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
             )
 
         valor_aberto = float(df["Saldo a receber"].sum())
+        status_fontes = f"{faturamento_status} | {rel_vendedor_status}"
         cur.execute(
             """
             INSERT INTO uploads (data_referencia, arquivo, qtd_linhas, novos, atualizados, pagos, valor_aberto, base_bi_cruzados, base_bi_nao_localizados, base_bi_status, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (data_ref_str, arquivo_nome, len(df), novos, atualizados, len(paid_ids), valor_aberto, base_bi_cruzados, base_bi_nao_localizados, faturamento_status, now),
+            (data_ref_str, arquivo_nome, len(df), novos, atualizados, len(paid_ids), valor_aberto, base_bi_cruzados, base_bi_nao_localizados, status_fontes, now),
         )
         conn.commit()
-        return novos, atualizados, len(paid_ids), valor_aberto, base_bi_cruzados, base_bi_nao_localizados, faturamento_status
+        return novos, atualizados, len(paid_ids), valor_aberto, base_bi_cruzados, base_bi_nao_localizados, status_fontes
     except Exception:
         conn.rollback()
         raise
@@ -2452,14 +2930,38 @@ def load_clientes() -> pd.DataFrame:
     return df
 
 
-def upsert_cliente_cadastro(conn: sqlite3.Connection, cliente_codigo: str, loja: str, nome_cliente: str, vendedor: str = "", gerente: str = "", observacao: str = "", tipo_cliente: str = "", cobrador: str = "", razao_social: str = "", cnpj: str = "", contato: str = "") -> None:
+def upsert_cliente_cadastro(
+    conn: sqlite3.Connection,
+    cliente_codigo: str,
+    loja: str,
+    nome_cliente: str,
+    vendedor: str = "",
+    gerente: str = "",
+    observacao: str = "",
+    tipo_cliente: str = "",
+    cobrador: str = "",
+    razao_social: str = "",
+    cnpj: str = "",
+    contato: str = "",
+    nome_fantasia: str = "",
+    telefone_financeiro: str = "",
+    telefone_comercial: str = "",
+) -> None:
     now = datetime.now().isoformat(timespec="seconds")
+    cliente_codigo = format_identifier(cliente_codigo, 6)
+    loja = format_identifier(loja, 2)
     cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
     conn.execute(
         """
-        INSERT INTO clientes (cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente, tipo_cliente, cobrador, observacao, razao_social, cnpj, contato, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO clientes (
+            cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente,
+            tipo_cliente, cobrador, observacao, razao_social, cnpj, contato,
+            nome_fantasia, telefone_financeiro, telefone_comercial, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(cliente_id) DO UPDATE SET
+            cliente_codigo = excluded.cliente_codigo,
+            loja = excluded.loja,
             nome_cliente = excluded.nome_cliente,
             vendedor = CASE WHEN excluded.vendedor != '' THEN excluded.vendedor ELSE clientes.vendedor END,
             gerente = CASE WHEN excluded.gerente != '' THEN excluded.gerente ELSE clientes.gerente END,
@@ -2469,14 +2971,29 @@ def upsert_cliente_cadastro(conn: sqlite3.Connection, cliente_codigo: str, loja:
             razao_social = CASE WHEN excluded.razao_social != '' THEN excluded.razao_social ELSE COALESCE(clientes.razao_social, '') END,
             cnpj = CASE WHEN excluded.cnpj != '' THEN excluded.cnpj ELSE COALESCE(clientes.cnpj, '') END,
             contato = CASE WHEN excluded.contato != '' THEN excluded.contato ELSE COALESCE(clientes.contato, '') END,
+            nome_fantasia = CASE WHEN excluded.nome_fantasia != '' THEN excluded.nome_fantasia ELSE COALESCE(clientes.nome_fantasia, '') END,
+            telefone_financeiro = CASE WHEN excluded.telefone_financeiro != '' THEN excluded.telefone_financeiro ELSE COALESCE(clientes.telefone_financeiro, '') END,
+            telefone_comercial = CASE WHEN excluded.telefone_comercial != '' THEN excluded.telefone_comercial ELSE COALESCE(clientes.telefone_comercial, '') END,
             updated_at = excluded.updated_at
         """,
-        (cid, cliente_codigo, loja, nome_cliente, upper_text(vendedor), upper_text(gerente), (tipo_cliente or "").strip(), upper_text(cobrador), upper_text(observacao), upper_text(razao_social), upper_text(cnpj), upper_text(contato), now, now),
+        (
+            cid, cliente_codigo, loja, upper_text(nome_cliente), upper_text(vendedor), upper_text(gerente),
+            (tipo_cliente or "").strip(), upper_text(cobrador), upper_text(observacao), upper_text(razao_social),
+            upper_text(cnpj), upper_text(contato), upper_text(nome_fantasia),
+            upper_text(telefone_financeiro), upper_text(telefone_comercial), now, now,
+        ),
     )
 
-
 def get_cliente_cadastro_map(conn: sqlite3.Connection) -> Dict[str, Dict[str, str]]:
-    df = pd.read_sql_query("SELECT cliente_id, vendedor, gerente, observacao, tipo_cliente, cobrador, razao_social, cnpj, contato FROM clientes", conn)
+    df = pd.read_sql_query(
+        """
+        SELECT cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente, observacao,
+               tipo_cliente, cobrador, razao_social, cnpj, contato, nome_fantasia,
+               telefone_financeiro, telefone_comercial
+          FROM clientes
+        """,
+        conn,
+    )
     if df.empty:
         return {}
     return df.set_index("cliente_id").to_dict(orient="index")
@@ -2515,13 +3032,179 @@ def migrate_clientes_from_titulos() -> int:
 
 
 def safe_to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
+    """Exporta Excel com códigos preservados como texto e visual padronizado."""
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for name, df in sheets.items():
             clean_name = str(name)[:31] or "Relatorio"
-            df.to_excel(writer, index=False, sheet_name=clean_name)
+            export_df = df.copy()
+            export_df.to_excel(writer, index=False, sheet_name=clean_name)
+            ws = writer.book[clean_name]
+
+            try:
+                from openpyxl.styles import Alignment, Font, PatternFill
+                from openpyxl.utils import get_column_letter
+
+                header_fill = PatternFill("solid", fgColor="123E67")
+                header_font = Font(color="FFFFFF", bold=True)
+                for cell in ws[1]:
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                ws.freeze_panes = "A2"
+                ws.auto_filter.ref = ws.dimensions
+                ws.row_dimensions[1].height = 34
+
+                text_tokens = ("COD", "CÓD", "LOJA", "CNPJ", "PRF", "NÚMERO", "NUMERO", "PARCELA", "TELEFONE", "TEL.")
+                money_tokens = ("VALOR", "SALDO", "VENCIDOS", "A VENCER", "CORRIGIDO")
+                date_tokens = ("DATA", "VENCTO", "VENCIMENTO", "EMISSÃO", "EMISSAO")
+
+                for idx, column_name in enumerate(export_df.columns, start=1):
+                    header = str(column_name).upper()
+                    letter = get_column_letter(idx)
+                    values = [str(column_name)] + [
+                        "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v)
+                        for v in export_df[column_name].head(500).tolist()
+                    ]
+                    width = min(max(max((len(v) for v in values), default=10) + 2, 10), 42)
+                    ws.column_dimensions[letter].width = width
+
+                    for cell in ws[letter][1:]:
+                        cell.alignment = Alignment(vertical="top", wrap_text=True)
+                        if any(token in header for token in text_tokens):
+                            cell.number_format = "@"
+                        elif any(token in header for token in money_tokens):
+                            cell.number_format = 'R$ #,##0.00'
+                        elif any(token in header for token in date_tokens):
+                            cell.number_format = "dd/mm/yyyy"
+            except Exception:
+                pass
     return output.getvalue()
 
+
+def _latest_history_for_titles(title_ids: List[str]) -> Dict[str, str]:
+    ids = [str(x) for x in title_ids if str(x)]
+    if not ids:
+        return {}
+    conn = get_conn()
+    try:
+        placeholders = ",".join(["?"] * len(ids))
+        hist = pd.read_sql_query(
+            f"""
+            SELECT id, titulo_id, data_acao, tipo_acao, responsavel, observacao
+              FROM historico_acoes
+             WHERE titulo_id IN ({placeholders})
+             ORDER BY data_acao DESC, id DESC
+            """,
+            conn,
+            params=ids,
+        )
+    finally:
+        conn.close()
+    if hist.empty:
+        return {}
+    hist = hist.drop_duplicates("titulo_id", keep="first")
+    result = {}
+    for _, row in hist.iterrows():
+        dt = pd.to_datetime(row.get("data_acao"), errors="coerce")
+        data_txt = dt.strftime("%d/%m/%Y") if not pd.isna(dt) else normalize_text(row.get("data_acao"))
+        parts = [data_txt, normalize_text(row.get("tipo_acao")), clean_history_text(row.get("observacao"))]
+        result[str(row["titulo_id"])] = " - ".join([p for p in parts if p])
+    return result
+
+
+def _display_parcela(value) -> str:
+    txt = normalize_text(value)
+    if not txt:
+        return ""
+    digits = re.sub(r"\D+", "", txt)
+    if not digits:
+        return txt
+    if digits == "0":
+        return "0"
+    return digits.zfill(3)
+
+
+def build_standard_collection_report(df: pd.DataFrame) -> pd.DataFrame:
+    """Monta o relatório operacional na ordem solicitada pela equipe."""
+    headers = [
+        "Codigo-Lj-Nome do Cliente", "N Fantasia", "Nome", "Prf-Numero\nParcela", "TP",
+        "Data de\nEmissao", "Vencto\nTitulo", "Vencto\nReal", "Bco St", "Valor Original",
+        "Tit Vencidos\nValor Atual", "Titulos a Vencer\nValor Atual",
+        "Tit Vencidos\nValor Corrigido", "Dias\nAtraso", "Hist.Cobranc",
+        "Tel. Fin.", "Tel. Com."
+    ]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=headers)
+
+    base = df.copy()
+    defaults = {
+        "titulo_id": "", "cliente_codigo": "", "loja": "", "nome_cliente": "",
+        "nome_fantasia": "", "razao_social": "", "prefixo": "", "numero_titulo": "",
+        "parcela": "", "tipo": "", "dt_emissao": "", "vencimento_titulo": "",
+        "vencimento": "", "banco_status": "", "valor_titulo": 0.0, "saldo_atual": 0.0,
+        "saldo_corrigido": 0.0, "multa": 0.0, "juros": 0.0, "dias_atraso": 0,
+        "observacao_atual": "", "telefone_financeiro": "", "telefone_comercial": "",
+    }
+    for col, default in defaults.items():
+        if col not in base.columns:
+            base[col] = default
+
+    history_map = _latest_history_for_titles(base["titulo_id"].astype(str).tolist())
+    today_ref = date.today()
+
+    rows = []
+    for _, r in base.iterrows():
+        codigo = format_identifier(r.get("cliente_codigo"), 6)
+        loja = format_identifier(r.get("loja"), 2)
+        fantasia = upper_text(r.get("nome_fantasia") or r.get("nome_cliente"))
+        razao = upper_text(r.get("razao_social") or r.get("nome_cliente"))
+        nome_composto = razao or fantasia
+        prefixo = upper_text(r.get("prefixo"))
+        numero = format_identifier(r.get("numero_titulo"), 6)
+        parcela = _display_parcela(r.get("parcela"))
+
+        venc_real = parse_iso_date(normalize_text(r.get("vencimento")))
+        venc_titulo = parse_iso_date(normalize_text(r.get("vencimento_titulo"))) or venc_real
+        emissao = parse_iso_date(normalize_text(r.get("dt_emissao")))
+        dias = r.get("dias_atraso")
+        try:
+            dias = int(dias)
+        except Exception:
+            dias = calcular_dias_atraso(normalize_text(r.get("vencimento")), today_ref)
+
+        saldo = float(r.get("saldo_atual") or 0)
+        valor_original = float(r.get("valor_titulo") or 0)
+        saldo_corrigido = float(r.get("saldo_corrigido") or 0)
+        if saldo_corrigido <= 0:
+            saldo_corrigido = saldo + float(r.get("multa") or 0) + float(r.get("juros") or 0)
+
+        vencido = saldo if dias > 0 else 0.0
+        a_vencer = saldo if dias <= 0 else 0.0
+        latest = history_map.get(str(r.get("titulo_id")), "")
+        obs = clean_history_text(r.get("observacao_atual"))
+        hist = latest or obs
+
+        rows.append({
+            "Codigo-Lj-Nome do Cliente": f"{codigo}-{loja}-{nome_composto}".strip("-"),
+            "N Fantasia": fantasia,
+            "Nome": razao,
+            "Prf-Numero\nParcela": f"{prefixo}-{numero}\n{parcela}".strip("-\n"),
+            "TP": upper_text(r.get("tipo")),
+            "Data de\nEmissao": emissao,
+            "Vencto\nTitulo": venc_titulo,
+            "Vencto\nReal": venc_real,
+            "Bco St": upper_text(r.get("banco_status")),
+            "Valor Original": valor_original,
+            "Tit Vencidos\nValor Atual": vencido,
+            "Titulos a Vencer\nValor Atual": a_vencer,
+            "Tit Vencidos\nValor Corrigido": saldo_corrigido if dias > 0 else 0.0,
+            "Dias\nAtraso": dias,
+            "Hist.Cobranc": hist,
+            "Tel. Fin.": upper_text(r.get("telefone_financeiro")),
+            "Tel. Com.": upper_text(r.get("telefone_comercial")),
+        })
+    return pd.DataFrame(rows, columns=headers)
 
 def update_cliente_fields(cliente_codigo: str, loja: str, nome_cliente: str, vendedor: str, gerente: str, observacao: str) -> int:
     backup_db("antes_responsaveis")
@@ -2584,6 +3267,9 @@ def save_cliente_all(
     razao_social: str,
     cnpj: str,
     contato: str,
+    nome_fantasia: str,
+    telefone_financeiro: str,
+    telefone_comercial: str,
     vendedor: str,
     gerente: str,
     observacao_cliente: str,
@@ -2605,12 +3291,17 @@ def save_cliente_all(
     conn = get_conn()
     try:
         now = datetime.now().isoformat(timespec="seconds")
+        cliente_codigo = format_identifier(cliente_codigo, 6)
+        loja = format_identifier(loja, 2)
         cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
         tipo_cliente = (tipo_cliente or "Não especial").strip() or "Não especial"
         cobrador = upper_text(cobrador)
         razao_social = upper_text(razao_social)
         cnpj = upper_text(cnpj)
         contato = upper_text(contato)
+        nome_fantasia = upper_text(nome_fantasia)
+        telefone_financeiro = upper_text(telefone_financeiro)
+        telefone_comercial = upper_text(telefone_comercial)
         vendedor = upper_text(vendedor)
         gerente = upper_text(gerente)
         observacao_cliente = upper_text(observacao_cliente)
@@ -2620,8 +3311,12 @@ def save_cliente_all(
         # Cadastro do cliente: grava exatamente o que está na tela.
         conn.execute(
             """
-            INSERT INTO clientes (cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente, tipo_cliente, cobrador, observacao, razao_social, cnpj, contato, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO clientes (
+                cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente, tipo_cliente, cobrador,
+                observacao, razao_social, cnpj, contato, nome_fantasia, telefone_financeiro,
+                telefone_comercial, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(cliente_id) DO UPDATE SET
                 cliente_codigo = excluded.cliente_codigo,
                 loja = excluded.loja,
@@ -2634,19 +3329,30 @@ def save_cliente_all(
                 razao_social = excluded.razao_social,
                 cnpj = excluded.cnpj,
                 contato = excluded.contato,
+                nome_fantasia = excluded.nome_fantasia,
+                telefone_financeiro = excluded.telefone_financeiro,
+                telefone_comercial = excluded.telefone_comercial,
                 updated_at = excluded.updated_at
             """,
-            (cid, cliente_codigo, loja, nome_cliente, vendedor, gerente, tipo_cliente, cobrador, observacao_cliente, razao_social, cnpj, contato, now, now),
+            (
+                cid, format_identifier(cliente_codigo, 6), format_identifier(loja, 2), nome_cliente,
+                vendedor, gerente, tipo_cliente, cobrador, observacao_cliente, razao_social, cnpj,
+                contato, nome_fantasia, telefone_financeiro, telefone_comercial, now, now
+            ),
         )
 
         where, params = _cliente_where_clause(cliente_codigo, loja, nome_cliente)
         cur = conn.execute(
             f"""
             UPDATE titulos
-               SET vendedor = ?, gerente = ?, observacao_atual = ?, razao_social = ?, cnpj = ?, contato = ?, updated_at = ?
+               SET vendedor = ?, gerente = ?, observacao_atual = ?, razao_social = ?, cnpj = ?, contato = ?,
+                   nome_fantasia = ?, telefone_financeiro = ?, telefone_comercial = ?, updated_at = ?
              WHERE {where} AND status != ?
             """,
-            [vendedor, gerente, observacao_cliente, razao_social, cnpj, contato, now] + params + [STATUS_PAGO],
+            [
+                vendedor, gerente, observacao_cliente, razao_social, cnpj, contato,
+                nome_fantasia, telefone_financeiro, telefone_comercial, now
+            ] + params + [STATUS_PAGO],
         )
         titulos_atualizados = int(cur.rowcount or 0)
 
@@ -2899,9 +3605,12 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
         cad = cad_map.get(cid, {})
         tipo_cliente = str(cad.get("tipo_cliente", "") or "Não especial")
         cobrador = str(cad.get("cobrador", "") or "")
-        razao_social = str(cad.get("razao_social", "") or "")
-        cnpj = str(cad.get("cnpj", "") or "")
-        contato = str(cad.get("contato", "") or "")
+        razao_social = str(cad.get("razao_social", "") or _join_unique(grp.get("razao_social", pd.Series(dtype=str)), limite=1) or "")
+        cnpj = str(cad.get("cnpj", "") or _join_unique(grp.get("cnpj", pd.Series(dtype=str)), limite=1) or "")
+        contato = str(cad.get("contato", "") or _join_unique(grp.get("contato", pd.Series(dtype=str)), limite=1) or "")
+        nome_fantasia = str(cad.get("nome_fantasia", "") or _join_unique(grp.get("nome_fantasia", pd.Series(dtype=str)), limite=1) or nome_cliente)
+        telefone_financeiro = str(cad.get("telefone_financeiro", "") or _join_unique(grp.get("telefone_financeiro", pd.Series(dtype=str)), limite=1) or "")
+        telefone_comercial = str(cad.get("telefone_comercial", "") or _join_unique(grp.get("telefone_comercial", pd.Series(dtype=str)), limite=1) or "")
         acao = get_action_for_day(max_ciclo, str(grp["status"].iloc[0]), promessa_cliente, ref)
         rows.append({
             "cliente_id": f"{cliente_codigo}|{loja}|{nome_cliente}",
@@ -2925,6 +3634,9 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
             "razao_social": razao_social,
             "cnpj": cnpj,
             "contato": contato,
+            "nome_fantasia": nome_fantasia,
+            "telefone_financeiro": telefone_financeiro,
+            "telefone_comercial": telefone_comercial,
             "valor_prioridade": float(grp["saldo_atual"].sum()) * (max_dias + 1),
         })
     out = pd.DataFrame(rows)
@@ -3074,8 +3786,16 @@ if page == "Upload diário":
                 st.success(status_base)
         except Exception as exc:
             st.warning(f"BASE BI indisponível: {exc}")
+        try:
+            _, status_cadastral = load_relatorio_vendedor_maps()
+            if "não encontrado" in status_cadastral.lower() or "erro" in status_cadastral.lower():
+                st.info(status_cadastral)
+            else:
+                st.success(status_cadastral)
+        except Exception as exc:
+            st.info(f"Relatório cadastral indisponível: {exc}")
 
-    with st.expander("Atualizar responsáveis dos títulos já existentes", expanded=False):
+    with st.expander("Atualizar bases nos títulos já existentes", expanded=False):
         st.caption("Use esta opção quando a BASE BI já foi carregada, mas os títulos antigos ainda aparecem sem vendedor ou sem gerente. O histórico é preservado e os campos manuais não são sobrescritos.")
         if st.button("Aplicar BASE BI nos títulos já existentes", use_container_width=True):
             resultado_bi = aplicar_base_bi_titulos_existentes()
@@ -3094,6 +3814,26 @@ if page == "Upload diário":
                         st.write(resultado_bi.get("sem_match"))
             else:
                 st.error(resultado_bi.get("mensagem", "Não foi possível aplicar a BASE BI."))
+
+        st.divider()
+        st.caption("O relatório de inadimplência por vendedor completa código e loja com zeros à esquerda, razão social e dados cadastrais. O histórico e as informações manuais são preservados.")
+        if st.button("Aplicar relatório por vendedor nos títulos já existentes", use_container_width=True):
+            resultado_cad = aplicar_relatorio_vendedor_titulos_existentes()
+            if resultado_cad.get("ok"):
+                checkpoint_cad = secure_save_checkpoint("aplicar_relatorio_vendedor")
+                st.success("Dados cadastrais aplicados aos títulos existentes.")
+                if not checkpoint_cad.get("github_ok"):
+                    st.warning(checkpoint_cad.get("github_msg", "Não foi possível sincronizar com o GitHub."))
+                q1, q2, q3, q4 = st.columns(4)
+                q1.metric("Títulos analisados", resultado_cad.get("analisados", 0))
+                q2.metric("Localizados", resultado_cad.get("localizados", 0))
+                q3.metric("Títulos atualizados", resultado_cad.get("titulos_atualizados", 0))
+                q4.metric("Clientes atualizados", resultado_cad.get("clientes_atualizados", 0))
+                if resultado_cad.get("sem_match"):
+                    with st.expander("Ver títulos sem correspondência cadastral", expanded=False):
+                        st.write(resultado_cad.get("sem_match"))
+            else:
+                st.error(resultado_cad.get("mensagem", "Não foi possível aplicar o relatório por vendedor."))
 
     uploaded = st.file_uploader("Relatório: Títulos a receber vencidos", type=["xlsx", "xls"])
     if uploaded:
@@ -3376,17 +4116,20 @@ elif page == "Cliente":
 
         c_cliente, c_saldo = st.columns([2.4, 1.1])
         with c_cliente:
-            metric_card("Cliente", nome_cliente, "Ação consolidada por cliente", long_text=True)
+            codigo_exibicao = f"{format_identifier(cliente_codigo, 6)}-{format_identifier(loja, 2)}"
+            metric_card("Cliente", nome_cliente, f"Código / loja: {codigo_exibicao}", long_text=True)
         with c_saldo:
             metric_card("Saldo total", br_money(selected["saldo_total"]), "Títulos abertos")
 
-        c_tit, c_atraso, c_acao = st.columns([1, 1, 2])
+        c_tit, c_atraso = st.columns(2)
         with c_tit:
             metric_card("Títulos", int(selected["qtd_titulos"]), "Quantidade em aberto")
         with c_atraso:
             metric_card("Maior atraso", f"{int(selected['maior_dias_atraso'])} dia(s)", "Maior vencimento em aberto")
-        with c_acao:
-            metric_card("Ação única", selected["acao_do_dia"], "Próxima etapa da régua", long_text=True)
+        st.markdown(
+            f"""<div class="screen-only action-suggestion"><b>Próxima ação sugerida:</b> {html.escape(str(selected["acao_do_dia"]))}</div>""",
+            unsafe_allow_html=True,
+        )
 
         st.markdown("#### Títulos abertos do cliente")
         tit_show = titulos_cliente.copy()
@@ -3405,8 +4148,11 @@ elif page == "Cliente":
         tipo_atual = str(selected.get("tipo_cliente", "Não especial") or "Não especial")
         cobrador_atual = str(selected.get("cobrador", "") or "")
         razao_padrao = str(selected.get("razao_social", "") or "")
+        nome_fantasia_padrao = str(selected.get("nome_fantasia", "") or nome_cliente)
         cnpj_padrao = str(selected.get("cnpj", "") or "")
         contato_padrao = str(selected.get("contato", "") or "")
+        telefone_financeiro_padrao = str(selected.get("telefone_financeiro", "") or "")
+        telefone_comercial_padrao = str(selected.get("telefone_comercial", "") or "")
         vendedor_padrao = str(selected["vendedor"] or "")
         gerente_padrao = str(selected["gerente"] or "")
         obs_padrao = ""
@@ -3434,8 +4180,13 @@ elif page == "Cliente":
 
             cad1, cad2 = st.columns(2)
             razao_social = cad1.text_input("Razão social", value=razao_padrao, key=f"razao_social_{widget_cliente_key}")
-            cnpj = cad2.text_input("CNPJ", value=cnpj_padrao, key=f"cnpj_{widget_cliente_key}")
-            contato = st.text_input("Contato do cliente", value=contato_padrao, placeholder="Nome, telefone ou e-mail do contato financeiro", key=f"contato_{widget_cliente_key}")
+            nome_fantasia = cad2.text_input("Nome fantasia", value=nome_fantasia_padrao, key=f"nome_fantasia_{widget_cliente_key}")
+            cad3, cad4 = st.columns(2)
+            cnpj = cad3.text_input("CNPJ", value=cnpj_padrao, key=f"cnpj_{widget_cliente_key}")
+            contato = cad4.text_input("Contato financeiro", value=contato_padrao, placeholder="Nome ou e-mail do responsável", key=f"contato_{widget_cliente_key}")
+            tel1, tel2 = st.columns(2)
+            telefone_financeiro = tel1.text_input("Telefone financeiro", value=telefone_financeiro_padrao, key=f"telefone_financeiro_{widget_cliente_key}")
+            telefone_comercial = tel2.text_input("Telefone comercial", value=telefone_comercial_padrao, key=f"telefone_comercial_{widget_cliente_key}")
 
             r1, r2 = st.columns(2)
             vendedor = r1.text_input("Vendedor", value=vendedor_padrao, key=f"vendedor_{widget_cliente_key}")
@@ -3481,6 +4232,9 @@ elif page == "Cliente":
                     razao_social=razao_social,
                     cnpj=cnpj,
                     contato=contato,
+                    nome_fantasia=nome_fantasia,
+                    telefone_financeiro=telefone_financeiro,
+                    telefone_comercial=telefone_comercial,
                     vendedor=vendedor,
                     gerente=gerente,
                     observacao_cliente=obs_atual,
@@ -3553,12 +4307,16 @@ elif page == "Cliente":
             rel_tit["razao_social"] = str(selected.get("razao_social", "") or "")
             rel_tit["cnpj"] = str(selected.get("cnpj", "") or "")
             rel_tit["contato"] = str(selected.get("contato", "") or "")
-            rel_tit = rel_tit[["nome_cliente", "razao_social", "cnpj", "contato", "tipo_cliente", "cobrador", "numero_titulo", "parcela", "tipo", "segmento", "vencimento", "valor_titulo", "saldo_atual", "status", "vendedor", "gerente", "primeira_aparicao", "ultima_aparicao", "data_baixa", "observacao_atual"]]
+            rel_tit["nome_fantasia"] = str(selected.get("nome_fantasia", "") or nome_cliente)
+            rel_tit["telefone_financeiro"] = str(selected.get("telefone_financeiro", "") or "")
+            rel_tit["telefone_comercial"] = str(selected.get("telefone_comercial", "") or "")
+            rel_tit["dias_atraso"] = rel_tit["vencimento"].apply(lambda x: calcular_dias_atraso(x, data_ref))
+        rel_padrao = build_standard_collection_report(rel_tit)
         rel_hist = hist_export.copy()
         if not rel_hist.empty:
             rel_hist = rel_hist.merge(all_titulos_cliente[["titulo_id", "numero_titulo", "parcela", "nome_cliente"]], on="titulo_id", how="left")
         try:
-            arquivo_excel = safe_to_excel_bytes({"Titulos": rel_tit, "Historico": rel_hist})
+            arquivo_excel = safe_to_excel_bytes({"Relatorio do cliente": rel_padrao, "Historico detalhado": rel_hist})
             st.download_button(
                 "Baixar relatório do cliente em Excel",
                 arquivo_excel,
@@ -3568,7 +4326,7 @@ elif page == "Cliente":
             )
         except Exception as exc:
             st.warning(f"Exportação em Excel indisponível: {exc}")
-            csv = rel_tit.to_csv(index=False, sep=";", encoding="utf-8-sig")
+            csv = rel_padrao.to_csv(index=False, sep=";", encoding="utf-8-sig")
             st.download_button("Baixar títulos do cliente em CSV", csv, file_name="relatorio_cliente.csv", mime="text/csv", use_container_width=True)
 
 
@@ -3685,7 +4443,8 @@ elif page == "Relatórios":
     else:
         meta_cols = [
             "cliente_codigo", "loja", "nome_cliente", "tipo_cliente", "cobrador",
-            "razao_social", "cnpj", "contato"
+            "razao_social", "cnpj", "contato", "nome_fantasia",
+            "telefone_financeiro", "telefone_comercial"
         ]
         # A base de títulos já pode conter razão social, CNPJ e contato. Ao juntar
         # os dados do cliente, o pandas cria colunas com sufixos. Consolidamos as
@@ -3703,7 +4462,10 @@ elif page == "Relatórios":
             how="left",
             suffixes=("", "_cadastro"),
         )
-        for campo in ["tipo_cliente", "cobrador", "razao_social", "cnpj", "contato"]:
+        for campo in [
+            "tipo_cliente", "cobrador", "razao_social", "cnpj", "contato",
+            "nome_fantasia", "telefone_financeiro", "telefone_comercial"
+        ]:
             campo_cad = f"{campo}_cadastro"
             if campo not in base.columns:
                 base[campo] = ""
@@ -3805,35 +4567,7 @@ elif page == "Relatórios":
         else:
             resumo_show = pd.DataFrame(columns=[modo_rel, "Clientes", "Titulos", "Valor", "Maior atraso"])
 
-        colunas_detalhes = [
-            "nome_cliente", "cliente_codigo", "loja", "prefixo", "numero_titulo", "parcela", "tipo",
-            "segmento", "vencimento", "valor_titulo", "saldo_atual", "dias_atraso", "faixa_atraso",
-            "acao_do_dia", "vendedor", "gerente", "tipo_cliente", "cobrador", "razao_social", "cnpj",
-            "contato", "status", "observacao_atual"
-        ]
-        if not rel.empty:
-            # Proteção adicional: uma coluna opcional ausente nunca deve derrubar
-            # a tela de relatórios. Campos não disponíveis saem vazios no Excel.
-            rel_export = rel.copy()
-            for coluna in colunas_detalhes:
-                if coluna not in rel_export.columns:
-                    rel_export[coluna] = ""
-            detalhes_export = rel_export[colunas_detalhes].copy()
-        else:
-            detalhes_export = pd.DataFrame(columns=colunas_detalhes)
-        if not detalhes_export.empty:
-            detalhes_export["Vencimento"] = pd.to_datetime(detalhes_export["vencimento"], errors="coerce").dt.strftime("%d/%m/%Y")
-            detalhes_export["Valor título"] = detalhes_export["valor_titulo"].apply(br_money)
-            detalhes_export["Saldo em aberto"] = detalhes_export["saldo_atual"].apply(br_money)
-            detalhes_export = detalhes_export.rename(columns={
-                "nome_cliente": "Cliente", "cliente_codigo": "Cód. Cliente", "loja": "Loja", "prefixo": "Prefixo",
-                "numero_titulo": "Título", "parcela": "Parcela", "tipo": "Tipo", "segmento": "Segmento",
-                "dias_atraso": "Dias atraso", "faixa_atraso": "Faixa de atraso", "acao_do_dia": "Ação do dia",
-                "vendedor": "Vendedor", "gerente": "Gerente", "tipo_cliente": "Tipo de cliente", "cobrador": "Cobrador",
-                "razao_social": "Razão social", "cnpj": "CNPJ", "contato": "Contato", "status": "Status",
-                "observacao_atual": "Observação"
-            })
-            detalhes_export = detalhes_export.drop(columns=[c for c in ["vencimento", "valor_titulo", "saldo_atual"] if c in detalhes_export.columns])
+        detalhes_export = build_standard_collection_report(rel)
 
         if formato in ["Resumo e títulos", "Somente resumo"]:
             st.markdown("#### Resumo")
