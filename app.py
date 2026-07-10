@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v6.1 LTS"
+APP_VERSION = "v6.3 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -173,7 +173,10 @@ st.markdown(
         .metric-card {min-height: 150px !important; display:flex; flex-direction:column; justify-content:flex-start;}
         .metric-value {font-size: clamp(18px, 1.65vw, 28px) !important; word-break: keep-all !important;}
         .metric-help {min-height: 32px;}
-        .footer-first {margin-top: 28px; padding: 18px 8px; color: #667085; text-align:center; font-size: 13px;}
+
+        .action-suggestion {background:#EAF5FF; border:1px solid #B8DAFF; border-left:5px solid #1267A8; border-radius:16px; padding:12px 16px; margin: 10px 0 16px 0; color:#0B2341; font-weight:800;}
+        .notif-box {background:#FFFFFF; border:1px solid #DCE7F3; border-radius:18px; padding:16px; box-shadow:0 8px 20px rgba(15,39,66,.06); margin:12px 0;}
+            .footer-first {margin-top: 28px; padding: 18px 8px; color: #667085; text-align:center; font-size: 13px;}
         .footer-first b {color:#0B2341;}
         .action-suggestion {
             background:#EFF8FF; border:1px solid #B2DDFF; border-left:5px solid #1267A8;
@@ -987,6 +990,14 @@ def init_db() -> None:
     ensure_column("clientes", "nome_fantasia", "TEXT DEFAULT ''")
     ensure_column("clientes", "telefone_financeiro", "TEXT DEFAULT ''")
     ensure_column("clientes", "telefone_comercial", "TEXT DEFAULT ''")
+    ensure_column("clientes", "endereco", "TEXT DEFAULT ''")
+    ensure_column("clientes", "bairro", "TEXT DEFAULT ''")
+    ensure_column("clientes", "municipio", "TEXT DEFAULT ''")
+    ensure_column("clientes", "uf", "TEXT DEFAULT ''")
+    ensure_column("clientes", "cep", "TEXT DEFAULT ''")
+    ensure_column("clientes", "email_nfe", "TEXT DEFAULT ''")
+    ensure_column("clientes", "email_comercial", "TEXT DEFAULT ''")
+    ensure_column("clientes", "email_financeiro", "TEXT DEFAULT ''")
     ensure_column("titulos", "razao_social", "TEXT DEFAULT ''")
     ensure_column("titulos", "cnpj", "TEXT DEFAULT ''")
     ensure_column("titulos", "contato", "TEXT DEFAULT ''")
@@ -1835,6 +1846,162 @@ def load_relatorio_vendedor_maps() -> tuple[tuple[dict, dict, dict], str]:
     return maps, f"{origem} • {len(df_base)} linha(s) • {mapped} título(s) mapeado(s)"
 
 
+
+def _read_excel_with_flexible_header(file_bytes: bytes, required_terms: list[str]) -> pd.DataFrame:
+    """Lê planilhas Protheus que trazem título na primeira linha e cabeçalho depois."""
+    # Tentativa rápida usando a segunda linha como cabeçalho, padrão de muitos relatórios MATR.
+    for header in [1, 0, 2, 3, 4, 5]:
+        try:
+            df = pd.read_excel(BytesIO(file_bytes), header=header)
+            df.columns = [str(c).strip() for c in df.columns]
+            keys = {normalize_col_key(c) for c in df.columns}
+            if all(any(normalize_col_key(term) in k or k in normalize_col_key(term) for k in keys) for term in required_terms):
+                return df.dropna(how="all")
+        except Exception:
+            pass
+    # Fallback: encontra a linha que contém as colunas necessárias.
+    raw = pd.read_excel(BytesIO(file_bytes), header=None)
+    for i in range(min(25, len(raw))):
+        row_vals = [normalize_col_key(x) for x in raw.iloc[i].tolist()]
+        if all(normalize_col_key(term) in row_vals for term in required_terms):
+            header = [str(x).strip() if str(x).strip() and str(x) != "nan" else f"Coluna_{j+1}" for j, x in enumerate(raw.iloc[i].tolist())]
+            df = raw.iloc[i+1:].copy()
+            df.columns = header
+            return df.dropna(how="all")
+    # Último fallback: leitor genérico já usado no app.
+    return read_excel_any(file_bytes)
+
+
+def find_cadastro_clientes_bytes() -> Tuple[Optional[bytes], str]:
+    """Localiza o cadastro de clientes Protheus, preferencialmente MATR021.
+
+    O arquivo pode ficar na raiz do repositório ou em dados/ com nomes como:
+    matr021.xlsx, MATR021.xlsx, cadastro_clientes.xlsx ou clientes.xlsx.
+    """
+    local_candidates = [
+        Path("matr021.xlsx"), Path("MATR021.xlsx"), Path("cadastro_clientes.xlsx"), Path("clientes.xlsx"),
+        Path("dados/matr021.xlsx"), Path("dados/MATR021.xlsx"), Path("dados/cadastro_clientes.xlsx"), Path("dados/clientes.xlsx"),
+    ]
+    for cand in local_candidates:
+        if cand.exists() and cand.is_file():
+            data = cand.read_bytes()
+            if len(data) >= 200:
+                return data, f"Cadastro de clientes local: {cand.as_posix()}"
+
+    configured = get_config("cadastro_clientes_github", "").strip() if DB_PATH.exists() else ""
+    if configured:
+        if configured.lower().startswith(("http://", "https://")):
+            try:
+                with urlopen(configured, timeout=35) as response:
+                    data = response.read()
+                if len(data) >= 200:
+                    return data, "Cadastro de clientes carregado pela URL configurada"
+            except Exception as exc:
+                return None, f"Erro ao ler cadastro de clientes configurado: {exc}"
+        data, msg = github_get_file_bytes(configured)
+        if data and len(data) >= 200:
+            return data, msg
+
+    github_candidates = [
+        "matr021.xlsx", "MATR021.xlsx", "cadastro_clientes.xlsx", "clientes.xlsx",
+        "dados/matr021.xlsx", "dados/MATR021.xlsx", "dados/cadastro_clientes.xlsx", "dados/clientes.xlsx",
+    ]
+    for cand in github_candidates:
+        data, msg = github_get_file_bytes(cand)
+        if data and len(data) >= 200:
+            return data, msg
+
+    # Também procura automaticamente por nomes que contenham matr021 ou clientes.
+    paths = github_list_file_paths("") + github_list_file_paths("dados")
+    for p in paths:
+        key = _file_name_key(p)
+        if p.lower().endswith((".xlsx", ".xls")) and ("matr021" in key or "clientes" in key or "cadastroclientes" in key):
+            data, msg = github_get_file_bytes(p)
+            if data and len(data) >= 200:
+                return data, msg
+    return None, "Cadastro de clientes não encontrado. Envie matr021.xlsx na raiz do repositório ou na pasta dados/."
+
+
+def build_cadastro_clientes_maps(df_cli: pd.DataFrame) -> tuple[dict, dict]:
+    """Monta mapas do MATR021 por código+loja e por nome do cliente."""
+    if df_cli.empty:
+        return {}, {}
+    col_codigo = find_col(df_cli, ["Codigo", "Código", "Cod Cliente", "Código Cliente", "Cliente"])
+    col_loja = find_col(df_cli, ["Loja", "Loja Cliente", "A1_LOJA"])
+    col_nome = find_col(df_cli, ["Nome", "Razão Social", "Razao Social", "Nome Cliente", "A1_NOME"])
+    col_cnpj = find_col(df_cli, ["CNPJ/CPF", "CNPJ", "CPF/CNPJ", "A1_CGC"])
+    col_fantasia = find_col(df_cli, ["N Fantasia", "Nome Fantasia", "N. Fantasia", "Fantasia", "A1_NREDUZ"])
+    col_endereco = find_col(df_cli, ["Endereco", "Endereço", "Endereço Cliente", "A1_END"])
+    col_bairro = find_col(df_cli, ["Bairro", "A1_BAIRRO"])
+    col_municipio = find_col(df_cli, ["Municipio", "Município", "Cidade", "A1_MUN"])
+    col_uf = find_col(df_cli, ["Estado", "UF", "A1_EST"])
+    col_cep = find_col(df_cli, ["CEP", "Cep", "A1_CEP"])
+    col_contato = find_col(df_cli, ["Contato", "Contato Financeiro", "Dept Contato", "Responsável", "Responsavel"])
+    col_tel_fin = find_col(df_cli, ["Tel. Fin.", "Tel Fin", "Telefone Financeiro", "Fone Financeiro"])
+    col_tel_com = find_col(df_cli, ["Tel. Com.", "Tel Com", "Telefone Comercial", "Tel. Fat", "Telefone", "Tel. Fat."])
+    col_email_nfe = find_col(df_cli, ["E-Mail NFe", "Email NFe", "E-mail NFe", "E-Mail Nf-e"])
+    col_email_com = find_col(df_cli, ["E-Mail Com", "Email Comercial", "E-mail Comercial", "E-Mail"])
+    col_email_fin = find_col(df_cli, ["E-Mail Fin", "Email Financeiro", "E-mail Financeiro"])
+
+    by_codigo_loja: dict[str, dict] = {}
+    by_nome: dict[str, dict] = {}
+    for _, r in df_cli.iterrows():
+        codigo = format_identifier(r.get(col_codigo, "") if col_codigo else "", 6)
+        loja = format_identifier(r.get(col_loja, "") if col_loja else "", 2)
+        nome = upper_text(r.get(col_nome, "") if col_nome else "")
+        if not (codigo or nome):
+            continue
+        info = {
+            "cliente_codigo": codigo,
+            "loja": loja,
+            "razao_social": nome,
+            "nome_cliente": nome,
+            "nome_fantasia": upper_text(r.get(col_fantasia, "") if col_fantasia else ""),
+            "cnpj": upper_text(r.get(col_cnpj, "") if col_cnpj else ""),
+            "contato": upper_text(r.get(col_contato, "") if col_contato else ""),
+            "telefone_financeiro": upper_text(r.get(col_tel_fin, "") if col_tel_fin else ""),
+            "telefone_comercial": upper_text(r.get(col_tel_com, "") if col_tel_com else ""),
+            "endereco": upper_text(r.get(col_endereco, "") if col_endereco else ""),
+            "bairro": upper_text(r.get(col_bairro, "") if col_bairro else ""),
+            "municipio": upper_text(r.get(col_municipio, "") if col_municipio else ""),
+            "uf": upper_text(r.get(col_uf, "") if col_uf else ""),
+            "cep": upper_text(r.get(col_cep, "") if col_cep else ""),
+            "email_nfe": upper_text(r.get(col_email_nfe, "") if col_email_nfe else ""),
+            "email_comercial": upper_text(r.get(col_email_com, "") if col_email_com else ""),
+            "email_financeiro": upper_text(r.get(col_email_fin, "") if col_email_fin else ""),
+            "origem": "MATR021",
+        }
+        if codigo and loja:
+            by_codigo_loja[f"{codigo}|{loja}".upper()] = info
+        if nome:
+            key = normalize_col_key(nome)
+            current = by_nome.get(key)
+            score = sum(bool(normalize_text(info.get(c, ""))) for c in ["cnpj", "nome_fantasia", "telefone_financeiro", "telefone_comercial", "endereco", "email_financeiro"])
+            old_score = sum(bool(normalize_text((current or {}).get(c, ""))) for c in ["cnpj", "nome_fantasia", "telefone_financeiro", "telefone_comercial", "endereco", "email_financeiro"])
+            if current is None or score >= old_score:
+                by_nome[key] = info
+    return by_codigo_loja, by_nome
+
+
+def load_cadastro_clientes_maps() -> tuple[tuple[dict, dict], str]:
+    data, origem = find_cadastro_clientes_bytes()
+    if not data:
+        return ({}, {}), origem
+    df_cli = _read_excel_with_flexible_header(data, ["Codigo", "Loja", "Nome"])
+    maps = build_cadastro_clientes_maps(df_cli)
+    qtd = len(maps[0]) if maps else 0
+    return maps, f"{origem} • {len(df_cli)} linha(s) • {qtd} cliente(s) mapeado(s)"
+
+
+def get_cadastro_cliente_info_for(row, maps: tuple[dict, dict]) -> dict:
+    if not maps:
+        return {}
+    by_codigo_loja, by_nome = maps
+    codigo = format_identifier(row.get("Cliente", row.get("cliente_codigo", "")), 6)
+    loja = format_identifier(row.get("Loja", row.get("loja", "")), 2)
+    nome = upper_text(row.get("Nome Cliente", row.get("nome_cliente", "")))
+    return by_codigo_loja.get(f"{codigo}|{loja}".upper()) or by_nome.get(normalize_col_key(nome)) or {}
+
 def build_faturamento_maps(df_base: pd.DataFrame) -> tuple[dict, dict, dict, dict]:
     """Cria mapas da BASE BI com uma única combinação por NF/segmento.
 
@@ -2227,6 +2394,208 @@ def import_legacy_history(df_legacy: pd.DataFrame, data_ref: date, responsavel: 
         conn.close()
 
 
+
+# -----------------------------------------------------------------------------
+# Notificação extrajudicial
+# -----------------------------------------------------------------------------
+def data_extenso_pt(dt: date) -> str:
+    meses = [
+        "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+        "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"
+    ]
+    return f"{dt.day:02d} de {meses[dt.month - 1]} de {dt.year}"
+
+
+def safe_filename(texto: str) -> str:
+    txt = normalize_text(texto).lower()
+    txt = re.sub(r"[áàãâä]", "a", txt)
+    txt = re.sub(r"[éèêë]", "e", txt)
+    txt = re.sub(r"[íìîï]", "i", txt)
+    txt = re.sub(r"[óòõôö]", "o", txt)
+    txt = re.sub(r"[úùûü]", "u", txt)
+    txt = re.sub(r"ç", "c", txt)
+    txt = re.sub(r"[^a-z0-9]+", "_", txt).strip("_")
+    return txt[:80] or "cliente"
+
+
+def _titulo_label_for_notificacao(row: pd.Series) -> str:
+    prefixo = upper_text(row.get("prefixo"))
+    numero = format_identifier(row.get("numero_titulo"), 6)
+    parcela = _display_parcela(row.get("parcela"))
+    if prefixo and parcela:
+        return f"{prefixo}-{numero}/{parcela}"
+    if prefixo:
+        return f"{prefixo}-{numero}"
+    if parcela:
+        return f"{numero}/{parcela}"
+    return numero
+
+
+def _valor_notificacao(row: pd.Series) -> float:
+    try:
+        corrigido = float(row.get("saldo_corrigido") or 0)
+    except Exception:
+        corrigido = 0.0
+    if corrigido > 0:
+        return corrigido
+    try:
+        return float(row.get("saldo_atual") or 0) + float(row.get("multa") or 0) + float(row.get("juros") or 0)
+    except Exception:
+        return 0.0
+
+
+def gerar_notificacao_extrajudicial_pdf(
+    cliente_nome: str,
+    razao_social: str,
+    cnpj: str,
+    endereco_cliente: str,
+    titulos_cliente: pd.DataFrame,
+    data_notificacao: date,
+    data_contrato_txt: str = "",
+    contraprestacao_txt: str = "",
+    prazo_txt: str = "",
+    signatario_txt: str = "Tiago Esteves da Cunha\nOAB/SP nº 266.999",
+) -> bytes:
+    """Gera a notificação extrajudicial em PDF usando os dados do cliente no CRM.
+
+    O modelo textual segue a estrutura do documento enviado pela equipe, mas é
+    gerado pelo próprio app para evitar depender de um PDF externo no deploy.
+    """
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import cm
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except Exception as exc:
+        raise RuntimeError("Pacote reportlab não instalado. Inclua reportlab>=4.0.0 no requirements.txt.") from exc
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=2.0 * cm,
+        leftMargin=2.0 * cm,
+        topMargin=1.6 * cm,
+        bottomMargin=1.6 * cm,
+    )
+    styles = getSampleStyleSheet()
+    normal = ParagraphStyle("FirstNormal", parent=styles["Normal"], fontName="Helvetica", fontSize=10.5, leading=16, alignment=TA_JUSTIFY)
+    small = ParagraphStyle("FirstSmall", parent=styles["Normal"], fontName="Helvetica", fontSize=8.5, leading=11, textColor=colors.HexColor("#4B5563"))
+    title = ParagraphStyle("FirstTitle", parent=styles["Heading1"], fontName="Helvetica-Bold", fontSize=13, leading=16, alignment=TA_CENTER, textColor=colors.HexColor("#0B2341"))
+    bold = ParagraphStyle("FirstBold", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=10.5, leading=14, textColor=colors.HexColor("#0B2341"))
+
+    destinatario = upper_text(razao_social or cliente_nome)
+    if not destinatario:
+        destinatario = upper_text(cliente_nome or "CLIENTE")
+    cnpj_txt = normalize_text(cnpj)
+    end_txt = upper_text(endereco_cliente)
+    prazo_txt = normalize_text(prazo_txt)
+    data_contrato_txt = normalize_text(data_contrato_txt)
+    contraprestacao_txt = normalize_text(contraprestacao_txt)
+
+    titulos_df = titulos_cliente.copy() if titulos_cliente is not None else pd.DataFrame()
+    if titulos_df.empty:
+        titulos_lista = "títulos em aberto"
+        vencimentos_lista = "datas constantes no demonstrativo de cobrança"
+        valor_total = 0.0
+        table_data = [["Título", "Parcela", "Vencimento", "Valor atualizado"]]
+    else:
+        titulos_df["_label"] = titulos_df.apply(_titulo_label_for_notificacao, axis=1)
+        titulos_df["_valor_notif"] = titulos_df.apply(_valor_notificacao, axis=1)
+        titulos_lista = ", ".join(titulos_df["_label"].astype(str).dropna().unique().tolist())
+        vencs = []
+        for v in titulos_df.get("vencimento", pd.Series(dtype=str)).tolist():
+            dt = parse_iso_date(normalize_text(v))
+            if dt:
+                vencs.append(dt.strftime("%d/%m/%Y"))
+        vencimentos_lista = ", ".join(sorted(set(vencs))) or "datas constantes no demonstrativo de cobrança"
+        valor_total = float(titulos_df["_valor_notif"].sum())
+        table_data = [["Título", "Parcela", "Vencimento", "Valor atualizado"]]
+        for _, r in titulos_df.sort_values(["vencimento", "numero_titulo", "parcela"], na_position="last").iterrows():
+            venc = parse_iso_date(normalize_text(r.get("vencimento")))
+            table_data.append([
+                upper_text(_titulo_label_for_notificacao(r)),
+                _display_parcela(r.get("parcela")),
+                venc.strftime("%d/%m/%Y") if venc else "",
+                br_money(_valor_notificacao(r)),
+            ])
+
+    contrato_frase = ""
+    if data_contrato_txt and contraprestacao_txt:
+        contrato_frase = f" em {html.escape(data_contrato_txt)}, mediante a contraprestação mensal de {html.escape(contraprestacao_txt)}"
+    elif data_contrato_txt:
+        contrato_frase = f" em {html.escape(data_contrato_txt)}"
+    elif contraprestacao_txt:
+        contrato_frase = f", mediante a contraprestação mensal de {html.escape(contraprestacao_txt)}"
+
+    prazo_frase = ""
+    if prazo_txt:
+        prazo_frase = f" no prazo de {html.escape(prazo_txt)}"
+
+    story = []
+    story.append(Paragraph("FIRST MEDICAL SERVICE LTDA", bold))
+    story.append(Paragraph("Rua Brsa. de Bela Vista, 411, cj. 234 — Congonhas, São Paulo-SP, CEP 04612-002<br/>(11) 4116-4116", small))
+    story.append(Spacer(1, 14))
+
+    story.append(Paragraph("À", normal))
+    story.append(Paragraph(html.escape(destinatario), bold))
+    if cnpj_txt:
+        story.append(Paragraph(f"CNPJ: {html.escape(cnpj_txt)}", normal))
+    if end_txt:
+        story.append(Paragraph(html.escape(end_txt), normal))
+    story.append(Spacer(1, 14))
+
+    story.append(Paragraph("Ref. NOTIFICAÇÃO EXTRAJUDICIAL POR INADIMPLÊNCIA", title))
+    story.append(Spacer(1, 14))
+
+    story.append(Paragraph("Prezados,", normal))
+    story.append(Spacer(1, 8))
+
+    paragraphs = [
+        f"A FIRST MEDICAL SERVICE LTDA foi contratada para a prestação de serviços de locação de equipamentos médicos{contrato_frase}.",
+        f"Ocorre que, segundo informações disponíveis no CRM de Cobrança, consta o não pagamento dos títulos {html.escape(titulos_lista)}, vencidos em {html.escape(vencimentos_lista)}, totalizando o valor de {html.escape(br_money(valor_total))}.",
+        f"Assim, com o objetivo de constituir a {html.escape(destinatario)} em mora por inadimplência para fins de cobrança, execução ou demais medidas cabíveis, serve a presente como derradeira oportunidade de negociação pacífica do débito através de pagamento ou composição do saldo em aberto.",
+        f"Diante do exposto, fica a {html.escape(destinatario)} notificada extrajudicialmente nos termos do art. 726 do Código de Processo Civil para que realize o pagamento ou transacione o débito{prazo_frase}, sob pena de rescisão contratual, remoção de equipamentos e adoção das medidas judiciais cabíveis.",
+    ]
+    for p in paragraphs:
+        story.append(Paragraph(p, normal))
+        story.append(Spacer(1, 8))
+
+    story.append(Spacer(1, 4))
+    story.append(Paragraph("Demonstrativo dos títulos em aberto", bold))
+    tabela = Table(table_data, colWidths=[5.0 * cm, 2.2 * cm, 3.2 * cm, 4.0 * cm], repeatRows=1)
+    tabela.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0B2341")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D0D5DD")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F9FAFB")]),
+        ("ALIGN", (3, 1), (3, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    story.append(tabela)
+    story.append(Spacer(1, 18))
+    story.append(Paragraph(f"São Paulo, {data_extenso_pt(data_notificacao)}.", normal))
+    story.append(Spacer(1, 36))
+    assinatura = [html.escape(x) for x in normalize_text(signatario_txt).split("\n") if normalize_text(x)]
+    if assinatura:
+        story.append(Paragraph("<br/>".join(assinatura), ParagraphStyle("Sign", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=10.5, leading=14, alignment=TA_CENTER)))
+
+    def add_page_footer(canvas_obj, doc_obj):
+        canvas_obj.saveState()
+        canvas_obj.setFont("Helvetica", 7.5)
+        canvas_obj.setFillColor(colors.HexColor("#667085"))
+        canvas_obj.drawRightString(A4[0] - 2.0 * cm, 1.0 * cm, f"CRM de Cobrança • Desenvolvido por Paula Verissimo • página {doc_obj.page}")
+        canvas_obj.restoreState()
+
+    doc.build(story, onFirstPage=add_page_footer, onLaterPages=add_page_footer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
 # -----------------------------------------------------------------------------
 # Consultas e regras
 # -----------------------------------------------------------------------------
@@ -2553,6 +2922,134 @@ def aplicar_relatorio_vendedor_titulos_existentes() -> Dict[str, object]:
     finally:
         conn.close()
 
+
+def aplicar_cadastro_clientes_titulos_existentes() -> Dict[str, object]:
+    """Completa dados cadastrais a partir do MATR021/cadastro de clientes.
+
+    Preenche código, loja, razão social, nome fantasia, CNPJ, contato e telefones
+    somente quando estiverem vazios ou quando o código/loja precisarem de zeros.
+    Não altera histórico de cobrança, ações ou agenda.
+    """
+    backup_db("antes_aplicar_cadastro_clientes")
+    try:
+        maps, status_base = load_cadastro_clientes_maps()
+    except Exception as exc:
+        return {"ok": False, "mensagem": f"Erro ao ler cadastro de clientes: {exc}", "analisados": 0, "localizados": 0, "titulos_atualizados": 0, "clientes_atualizados": 0, "sem_match": []}
+
+    if not any(maps):
+        return {"ok": False, "mensagem": status_base, "analisados": 0, "localizados": 0, "titulos_atualizados": 0, "clientes_atualizados": 0, "sem_match": []}
+
+    conn = get_conn()
+    try:
+        titulos = pd.read_sql_query(
+            """
+            SELECT titulo_id, prefixo, numero_titulo, parcela, tipo, cliente_codigo, loja, nome_cliente,
+                   razao_social, cnpj, contato, nome_fantasia, telefone_financeiro,
+                   telefone_comercial, status
+              FROM titulos
+             WHERE status != ?
+            """,
+            conn,
+            params=[STATUS_PAGO],
+        )
+        if titulos.empty:
+            return {"ok": True, "mensagem": "Não há títulos em aberto para atualizar.", "analisados": 0, "localizados": 0, "titulos_atualizados": 0, "clientes_atualizados": 0, "sem_match": []}
+
+        cad_map = get_cliente_cadastro_map(conn)
+        now = datetime.now().isoformat(timespec="seconds")
+        cur = conn.cursor()
+        localizados = 0
+        atualizados = 0
+        clientes_ids = set()
+        sem_match = []
+
+        for _, t in titulos.iterrows():
+            info = get_cadastro_cliente_info_for(t, maps)
+            if not info:
+                if len(sem_match) < 80:
+                    sem_match.append(f"{normalize_text(t.get('cliente_codigo'))}-{normalize_text(t.get('loja'))} • {normalize_text(t.get('nome_cliente'))}")
+                continue
+            localizados += 1
+
+            old_code = normalize_text(t.get("cliente_codigo"))
+            old_loja = normalize_text(t.get("loja"))
+            nome_cliente = upper_text(t.get("nome_cliente")) or upper_text(info.get("razao_social"))
+            new_code = info.get("cliente_codigo") or format_identifier(old_code, 6)
+            new_loja = info.get("loja") or format_identifier(old_loja, 2)
+            old_cid = make_cliente_id(old_code, old_loja, nome_cliente)
+            new_cid = make_cliente_id(new_code, new_loja, nome_cliente)
+            cad = cad_map.get(new_cid) or cad_map.get(old_cid) or {}
+
+            razao = normalize_text(t.get("razao_social")) or normalize_text(cad.get("razao_social")) or normalize_text(info.get("razao_social")) or nome_cliente
+            fantasia = normalize_text(t.get("nome_fantasia")) or normalize_text(cad.get("nome_fantasia")) or normalize_text(info.get("nome_fantasia")) or nome_cliente
+            cnpj = normalize_text(t.get("cnpj")) or normalize_text(cad.get("cnpj")) or normalize_text(info.get("cnpj"))
+            contato = normalize_text(t.get("contato")) or normalize_text(cad.get("contato")) or normalize_text(info.get("contato"))
+            tel_fin = normalize_text(t.get("telefone_financeiro")) or normalize_text(cad.get("telefone_financeiro")) or normalize_text(info.get("telefone_financeiro"))
+            tel_com = normalize_text(t.get("telefone_comercial")) or normalize_text(cad.get("telefone_comercial")) or normalize_text(info.get("telefone_comercial"))
+
+            changed = any([
+                new_code != old_code,
+                new_loja != old_loja,
+                razao != normalize_text(t.get("razao_social")),
+                fantasia != normalize_text(t.get("nome_fantasia")),
+                cnpj != normalize_text(t.get("cnpj")),
+                contato != normalize_text(t.get("contato")),
+                tel_fin != normalize_text(t.get("telefone_financeiro")),
+                tel_com != normalize_text(t.get("telefone_comercial")),
+            ])
+            if changed:
+                cur.execute(
+                    """
+                    UPDATE titulos
+                       SET cliente_codigo = ?, loja = ?, razao_social = ?, cnpj = ?, contato = ?,
+                           nome_fantasia = ?, telefone_financeiro = ?, telefone_comercial = ?, updated_at = ?
+                     WHERE titulo_id = ?
+                    """,
+                    (new_code, new_loja, upper_text(razao), upper_text(cnpj), upper_text(contato),
+                     upper_text(fantasia), upper_text(tel_fin), upper_text(tel_com), now, t["titulo_id"]),
+                )
+                atualizados += 1
+
+            upsert_cliente_cadastro(
+                conn,
+                new_code,
+                new_loja,
+                nome_cliente,
+                vendedor=normalize_text(cad.get("vendedor")),
+                gerente=normalize_text(cad.get("gerente")),
+                observacao=normalize_text(cad.get("observacao")),
+                tipo_cliente=normalize_text(cad.get("tipo_cliente")),
+                cobrador=normalize_text(cad.get("cobrador")),
+                razao_social=razao,
+                cnpj=cnpj,
+                contato=contato,
+                nome_fantasia=fantasia,
+                telefone_financeiro=tel_fin,
+                telefone_comercial=tel_com,
+            )
+            clientes_ids.add(new_cid)
+
+        conn.commit()
+        try:
+            upload_db_to_github("aplicar_cadastro_clientes")
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "mensagem": status_base,
+            "analisados": len(titulos),
+            "localizados": localizados,
+            "titulos_atualizados": atualizados,
+            "clientes_atualizados": len(clientes_ids),
+            "sem_match": sem_match,
+        }
+    except Exception as exc:
+        conn.rollback()
+        return {"ok": False, "mensagem": f"Erro ao aplicar cadastro de clientes: {exc}", "analisados": 0, "localizados": 0, "titulos_atualizados": 0, "clientes_atualizados": 0, "sem_match": []}
+    finally:
+        conn.close()
+
+
 def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple[int, int, int, float, int, int, str]:
     backup_db("antes_upload")
     conn = get_conn()
@@ -2576,6 +3073,10 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
             rel_vendedor_maps, rel_vendedor_status = load_relatorio_vendedor_maps()
         except Exception as exc:
             rel_vendedor_maps, rel_vendedor_status = ({}, {}, {}), f"Erro ao ler relatório por vendedor: {exc}"
+        try:
+            cadastro_clientes_maps, cadastro_clientes_status = load_cadastro_clientes_maps()
+        except Exception as exc:
+            cadastro_clientes_maps, cadastro_clientes_status = ({}, {}), f"Erro ao ler cadastro de clientes: {exc}"
 
         existing = pd.read_sql_query("SELECT titulo_id, status, primeira_aparicao, ultima_aparicao FROM titulos", conn)
         existing_ids = set(existing["titulo_id"].astype(str).tolist()) if not existing.empty else set()
@@ -2594,9 +3095,10 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
 
             auto_info = get_faturamento_info_for(row, faturamento_maps)
             cad_info = get_relatorio_vendedor_info_for(row, rel_vendedor_maps)
+            cad_cliente_info = get_cadastro_cliente_info_for(row, cadastro_clientes_maps)
 
-            cliente_codigo = cad_info.get("cliente_codigo") or format_identifier(raw_code, 6)
-            loja = cad_info.get("loja") or format_identifier(raw_loja, 2)
+            cliente_codigo = cad_info.get("cliente_codigo") or cad_cliente_info.get("cliente_codigo") or format_identifier(raw_code, 6)
+            loja = cad_info.get("loja") or cad_cliente_info.get("loja") or format_identifier(raw_loja, 2)
             cid_final = make_cliente_id(cliente_codigo, loja, nome_cliente)
             cid_raw = make_cliente_id(raw_code, raw_loja, nome_cliente)
             cad = (
@@ -2624,19 +3126,21 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
 
             razao_cad = upper_text(
                 cad.get("razao_social", "")
+                or cad_cliente_info.get("razao_social", "")
                 or cad_info.get("razao_social", "")
                 or auto_info.get("razao_social", "")
                 or nome_cliente
             )
             nome_fantasia_cad = upper_text(
                 cad.get("nome_fantasia", "")
+                or cad_cliente_info.get("nome_fantasia", "")
                 or cad_info.get("nome_fantasia", "")
                 or nome_cliente
             )
-            cnpj_cad = upper_text(cad.get("cnpj", "") or auto_info.get("cnpj", "") or "")
-            contato_cad = upper_text(cad.get("contato", "") or auto_info.get("contato", "") or "")
-            tel_fin_cad = upper_text(cad.get("telefone_financeiro", "") or cad_info.get("telefone_financeiro", "") or "")
-            tel_com_cad = upper_text(cad.get("telefone_comercial", "") or cad_info.get("telefone_comercial", "") or "")
+            cnpj_cad = upper_text(cad.get("cnpj", "") or cad_cliente_info.get("cnpj", "") or auto_info.get("cnpj", "") or "")
+            contato_cad = upper_text(cad.get("contato", "") or cad_cliente_info.get("contato", "") or auto_info.get("contato", "") or "")
+            tel_fin_cad = upper_text(cad.get("telefone_financeiro", "") or cad_cliente_info.get("telefone_financeiro", "") or cad_info.get("telefone_financeiro", "") or "")
+            tel_com_cad = upper_text(cad.get("telefone_comercial", "") or cad_cliente_info.get("telefone_comercial", "") or cad_info.get("telefone_comercial", "") or "")
             venc_titulo_cad = normalize_text(cad_info.get("vencimento_titulo", "") or row.get("vencimento_str") or "")
             banco_status_cad = upper_text(cad_info.get("banco_status", "") or "")
             saldo_corrigido_cad = float(cad_info.get("saldo_corrigido", 0) or 0)
@@ -3790,7 +4294,7 @@ render_secure_save_notice()
 
 with st.sidebar:
     st.markdown("### Navegação")
-    NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Agenda", "Carteira", "Relatórios", "Histórico", "Régua", "Base de títulos", "Segurança"]
+    NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Agenda", "Simulador", "Carteira", "Relatórios", "Histórico", "Régua", "Base de títulos", "Segurança"]
     if is_admin():
         NAV_OPTIONS.insert(-1, "Usuários")
     if "_pending_nav_page" in st.session_state:
@@ -3841,6 +4345,14 @@ if page == "Upload diário":
                 st.success(status_cadastral)
         except Exception as exc:
             st.info(f"Relatório cadastral indisponível: {exc}")
+        try:
+            _, status_clientes = load_cadastro_clientes_maps()
+            if "não encontrado" in status_clientes.lower() or "erro" in status_clientes.lower():
+                st.info(status_clientes)
+            else:
+                st.success(status_clientes)
+        except Exception as exc:
+            st.info(f"Cadastro de clientes indisponível: {exc}")
 
     with st.expander("Atualizar bases nos títulos já existentes", expanded=False):
         st.caption("Use esta opção quando a BASE BI já foi carregada, mas os títulos antigos ainda aparecem sem vendedor ou sem gerente. O histórico é preservado e os campos manuais não são sobrescritos.")
@@ -3881,6 +4393,26 @@ if page == "Upload diário":
                         st.write(resultado_cad.get("sem_match"))
             else:
                 st.error(resultado_cad.get("mensagem", "Não foi possível aplicar o relatório por vendedor."))
+
+        st.divider()
+        st.caption("O cadastro de clientes MATR021 completa código/loja, razão social, nome fantasia, CNPJ, contato e telefones. O histórico e os responsáveis manuais são preservados.")
+        if st.button("Aplicar cadastro de clientes nos títulos já existentes", use_container_width=True):
+            resultado_cli = aplicar_cadastro_clientes_titulos_existentes()
+            if resultado_cli.get("ok"):
+                checkpoint_cli = secure_save_checkpoint("aplicar_cadastro_clientes")
+                st.success("Cadastro de clientes aplicado aos títulos existentes.")
+                if not checkpoint_cli.get("github_ok"):
+                    st.warning(checkpoint_cli.get("github_msg", "Não foi possível sincronizar com o GitHub."))
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Títulos analisados", resultado_cli.get("analisados", 0))
+                c2.metric("Localizados", resultado_cli.get("localizados", 0))
+                c3.metric("Títulos atualizados", resultado_cli.get("titulos_atualizados", 0))
+                c4.metric("Clientes atualizados", resultado_cli.get("clientes_atualizados", 0))
+                if resultado_cli.get("sem_match"):
+                    with st.expander("Ver clientes sem correspondência no cadastro", expanded=False):
+                        st.write(resultado_cli.get("sem_match"))
+            else:
+                st.error(resultado_cli.get("mensagem", "Não foi possível aplicar o cadastro de clientes."))
 
     uploaded = st.file_uploader("Relatório: Títulos a receber vencidos", type=["xlsx", "xls"])
     if uploaded:
@@ -4161,6 +4693,7 @@ elif page == "Cliente":
         loja = str(selected["loja"])
         nome_cliente = str(selected["nome_cliente"])
         titulos_cliente = load_titulos_cliente(cliente_codigo, loja, nome_cliente, somente_abertos=True)
+        widget_cliente_key = re.sub(r"[^A-Za-z0-9_]+", "_", f"{cliente_codigo}_{loja}_{nome_cliente}")[:80]
 
         # Ação do dia no topo da tela do cliente.
         # Fica visível também na impressão/print para que o cliente saia com a orientação de cobrança.
@@ -4195,6 +4728,57 @@ elif page == "Cliente":
                 hide_index=True,
             )
 
+
+        st.markdown("#### Notificação extrajudicial")
+        st.caption("Gere a notificação já preenchida com os dados do cliente e dos títulos em aberto.")
+        with st.expander("Preencher e baixar notificação", expanded=False):
+            notif_c1, notif_c2 = st.columns(2)
+            notif_dest = notif_c1.text_input(
+                "Destinatário / razão social",
+                value=str(selected.get("razao_social", "") or nome_cliente),
+                key=f"notif_dest_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None,
+            )
+            notif_cnpj = notif_c2.text_input(
+                "CNPJ",
+                value=str(selected.get("cnpj", "") or ""),
+                key=f"notif_cnpj_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None,
+            )
+            notif_c3, notif_c4, notif_c5 = st.columns([1.2, 1.2, 1])
+            notif_data = notif_c3.date_input("Data da notificação", value=data_ref, format="DD/MM/YYYY", key=f"notif_data_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
+            notif_contrato = notif_c4.text_input("Data/contrato de locação", value="", placeholder="Ex.: 01/01/2021", key=f"notif_contrato_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
+            notif_prazo = notif_c5.text_input("Prazo", value="", placeholder="Ex.: 5 dias úteis", key=f"notif_prazo_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
+            notif_c6, notif_c7 = st.columns(2)
+            notif_mensal = notif_c6.text_input("Contraprestação mensal", value="", placeholder="Opcional", key=f"notif_mensal_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
+            notif_endereco = notif_c7.text_input("Endereço do cliente", value="", placeholder="Opcional", key=f"notif_endereco_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
+            notif_sign = st.text_area(
+                "Assinatura",
+                value="Tiago Esteves da Cunha\nOAB/SP nº 266.999",
+                height=68,
+                key=f"notif_sign_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None,
+            )
+            try:
+                pdf_bytes = gerar_notificacao_extrajudicial_pdf(
+                    cliente_nome=nome_cliente,
+                    razao_social=notif_dest,
+                    cnpj=notif_cnpj,
+                    endereco_cliente=notif_endereco,
+                    titulos_cliente=titulos_cliente,
+                    data_notificacao=notif_data,
+                    data_contrato_txt=notif_contrato,
+                    contraprestacao_txt=notif_mensal,
+                    prazo_txt=notif_prazo,
+                    signatario_txt=notif_sign,
+                )
+                st.download_button(
+                    "Baixar notificação preenchida em PDF",
+                    data=pdf_bytes,
+                    file_name=f"notificacao_extrajudicial_{safe_filename(nome_cliente)}_{notif_data.strftime('%Y%m%d')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            except Exception as exc:
+                st.error(f"Não foi possível gerar a notificação: {exc}")
+
         st.markdown("#### Alterações do cliente")
         tipo_atual = str(selected.get("tipo_cliente", "Não especial") or "Não especial")
         cobrador_atual = str(selected.get("cobrador", "") or "")
@@ -4209,10 +4793,6 @@ elif page == "Cliente":
         obs_padrao = ""
         if not titulos_cliente.empty:
             obs_padrao = _join_unique(titulos_cliente["observacao_atual"], limite=1)
-
-        # Cada cliente precisa ter chaves próprias nos campos.
-        # Sem isso, o Streamlit reaproveita o texto digitado do cliente anterior.
-        widget_cliente_key = re.sub(r"[^A-Za-z0-9_]+", "_", f"{cliente_codigo}_{loja}_{nome_cliente}")[:80]
 
         with st.form(f"form_salvar_tudo_cliente_{widget_cliente_key}"):
             cmeta1, cmeta2 = st.columns(2)
@@ -4429,6 +5009,92 @@ elif page == "Agenda":
                         secure_save_checkpoint("concluir_agenda")
                         st.success("Retorno concluído.")
                         st.rerun()
+
+
+elif page == "Simulador":
+    st.markdown("### Simulador de juros e multa")
+    st.caption("Simulação operacional para apoiar negociações. O cálculo padrão usa juros de 1% ao mês e multa de 10% ao mês, proporcional aos dias de atraso.")
+
+    taxa_cols = st.columns(4)
+    data_calculo = taxa_cols[0].date_input("Data de cálculo", value=data_ref, format="DD/MM/YYYY", key="sim_data_calculo")
+    juros_mes = taxa_cols[1].number_input("Juros ao mês (%)", min_value=0.0, max_value=100.0, value=1.0, step=0.1, key="sim_juros_mes")
+    multa_mes = taxa_cols[2].number_input("Multa ao mês (%)", min_value=0.0, max_value=100.0, value=10.0, step=0.5, key="sim_multa_mes")
+    base_dias = taxa_cols[3].number_input("Dias por mês", min_value=1, max_value=31, value=30, step=1, key="sim_dias_mes")
+
+    aba_cliente, aba_livre = st.tabs(["Títulos do CRM", "Simulação livre"])
+
+    with aba_cliente:
+        fila_sim = prepare_fila_clientes(data_ref)
+        if fila_sim.empty:
+            st.info("Não há clientes em cobrança para simular.")
+        else:
+            fila_sim = fila_sim.sort_values(["nome_cliente", "saldo_total"], ascending=[True, False]).reset_index(drop=True)
+            labels = [
+                f"{format_identifier(r.cliente_codigo, 6)}-{format_identifier(r.loja, 2)} • {r.nome_cliente} • {br_money(r.saldo_total)}"
+                for r in fila_sim.itertuples(index=False)
+            ]
+            idx = st.selectbox("Cliente", list(range(len(labels))), format_func=lambda i: labels[i], key="sim_cliente_idx")
+            sel = fila_sim.iloc[int(idx)]
+            tit = load_titulos_cliente(sel["cliente_codigo"], sel["loja"], sel["nome_cliente"], somente_abertos=True)
+            if tit.empty:
+                st.info("Cliente sem títulos abertos.")
+            else:
+                rows = []
+                for _, r in tit.iterrows():
+                    venc = parse_iso_date(normalize_text(r.get("vencimento")))
+                    dias = max((data_calculo - venc).days, 0) if venc else 0
+                    meses = dias / float(base_dias or 30)
+                    principal = float(r.get("saldo_atual") or 0)
+                    juros_calc = principal * (float(juros_mes) / 100.0) * meses
+                    multa_calc = principal * (float(multa_mes) / 100.0) * meses
+                    corrigido = principal + juros_calc + multa_calc
+                    rows.append({
+                        "Título": normalize_text(r.get("numero_titulo")),
+                        "Parcela": normalize_text(r.get("parcela")),
+                        "Vencimento": venc.strftime("%d/%m/%Y") if venc else "",
+                        "Dias atraso": dias,
+                        "Valor atual": principal,
+                        "Juros": juros_calc,
+                        "Multa": multa_calc,
+                        "Valor corrigido": corrigido,
+                    })
+                sim_df = pd.DataFrame(rows)
+                totais = sim_df[["Valor atual", "Juros", "Multa", "Valor corrigido"]].sum()
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Valor atual", br_money(totais["Valor atual"]))
+                c2.metric("Juros simulados", br_money(totais["Juros"]))
+                c3.metric("Multa simulada", br_money(totais["Multa"]))
+                c4.metric("Total corrigido", br_money(totais["Valor corrigido"]))
+                show_df = sim_df.copy()
+                for col in ["Valor atual", "Juros", "Multa", "Valor corrigido"]:
+                    show_df[col] = show_df[col].apply(br_money)
+                st.dataframe(show_df, use_container_width=True, hide_index=True)
+                export_sim = sim_df.copy()
+                excel = safe_to_excel_bytes({"Simulador": export_sim})
+                st.download_button(
+                    "Exportar simulação em Excel",
+                    data=excel,
+                    file_name=f"simulador_juros_multa_{safe_filename(str(sel['nome_cliente']))}_{date.today().isoformat()}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+
+    with aba_livre:
+        st.markdown("#### Simulação manual")
+        l1, l2, l3 = st.columns(3)
+        valor_livre = l1.number_input("Valor base", min_value=0.0, value=1000.0, step=100.0, format="%.2f", key="sim_livre_valor")
+        venc_livre = l2.date_input("Vencimento", value=data_ref, format="DD/MM/YYYY", key="sim_livre_venc")
+        calc_livre = l3.date_input("Calcular até", value=data_calculo, format="DD/MM/YYYY", key="sim_livre_calc")
+        dias_livre = max((calc_livre - venc_livre).days, 0)
+        meses_livre = dias_livre / float(base_dias or 30)
+        juros_livre = float(valor_livre) * (float(juros_mes) / 100.0) * meses_livre
+        multa_livre = float(valor_livre) * (float(multa_mes) / 100.0) * meses_livre
+        total_livre = float(valor_livre) + juros_livre + multa_livre
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Dias em atraso", int(dias_livre))
+        s2.metric("Juros", br_money(juros_livre))
+        s3.metric("Multa", br_money(multa_livre))
+        s4.metric("Valor corrigido", br_money(total_livre))
 
 elif page == "Carteira":
     st.markdown("### Carteira comercial")
