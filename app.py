@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v6.4 LTS"
+APP_VERSION = "v6.6 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -1522,6 +1522,27 @@ def read_excel_any(file_or_bytes) -> pd.DataFrame:
             df = pd.read_csv(BytesIO(file_bytes), sep=None, engine="python")
         except Exception:
             df = _xlsx_fallback_to_dataframe(file_bytes)
+
+    # Alguns relatórios Protheus/MATR021 vêm com uma linha de título antes do cabeçalho real.
+    # Quando identificamos uma linha contendo campos como Codigo/Loja/Nome, promovemos essa linha
+    # para cabeçalho. Isso permite usar o MATR021 diretamente, sem editar o Excel.
+    try:
+        header_idx = None
+        for i in range(min(15, len(df))):
+            vals = [normalize_col_key(v) for v in df.iloc[i].tolist()]
+            has_codigo = any(v in {"codigo", "codigocliente", "cliente"} for v in vals)
+            has_loja = any(v in {"loja", "lojacliente"} for v in vals)
+            has_nome = any(v in {"nome", "razaosocial", "nomecliente"} for v in vals)
+            if has_codigo and has_loja and has_nome:
+                header_idx = i
+                break
+        if header_idx is not None:
+            new_cols = [str(c).strip() if str(c).strip() and str(c).lower() != "nan" else f"Coluna_{j+1}" for j, c in enumerate(df.iloc[header_idx].tolist())]
+            df = df.iloc[header_idx + 1:].copy()
+            df.columns = new_cols
+    except Exception:
+        pass
+
     df.columns = [str(c).strip() for c in df.columns]
     return df.dropna(how="all")
 
@@ -2463,72 +2484,71 @@ def gerar_notificacao_extrajudicial_pdf(
 ) -> bytes:
     """Gera a notificação extrajudicial usando o PDF oficial como timbrado.
 
-    A estratégia desta versão é manter o modelo oficial como base visual e
-    preencher por cima somente os campos variáveis destacados no PDF aprovado.
-    Para evitar sobreposição com os textos de exemplo do modelo, o corpo do
-    documento é coberto por uma área branca e o mesmo texto oficial é redesenhado
-    com os dados do cliente/títulos.
+    Mantém o timbrado e o texto-base aprovados, mas redesenha o corpo do documento
+    para evitar sobreposição de conteúdo. Quando necessário, o documento se expande
+    automaticamente para 2 ou mais páginas. Em vez de listar os títulos dentro do
+    parágrafo, inclui uma tabela-resumo com título/parcela, vencimento e valor.
     """
     try:
+        from copy import deepcopy
         from reportlab.lib import colors
-        from reportlab.lib.enums import TA_JUSTIFY
-        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT, TA_CENTER
         from reportlab.lib.styles import ParagraphStyle
         from reportlab.lib.units import cm
-        from reportlab.pdfgen import canvas
-        from reportlab.platypus import Paragraph
+        from reportlab.platypus import (
+            SimpleDocTemplate,
+            Paragraph,
+            Spacer,
+            Table,
+            TableStyle,
+        )
         from pypdf import PdfReader, PdfWriter
     except Exception as exc:
         raise RuntimeError("Inclua reportlab>=4.0.0 e pypdf>=4.0.0 no requirements.txt.") from exc
 
-    # Dados variáveis
     destinatario = normalize_text(razao_social or cliente_nome).strip() or normalize_text(cliente_nome or "CLIENTE")
     localidade = normalize_text(endereco_cliente).strip()
-    if not localidade:
-        localidade = ""
     data_contrato_txt = normalize_text(data_contrato_txt).strip() or "____/____/________"
     contraprestacao_txt = normalize_text(contraprestacao_txt).strip() or "R$ __________"
     prazo_txt = normalize_text(prazo_txt).strip()
 
     titulos_df = titulos_cliente.copy() if titulos_cliente is not None else pd.DataFrame()
     if titulos_df.empty:
-        titulos_lista = "títulos em aberto"
-        vencimentos_lista = "datas constantes no demonstrativo de cobrança"
         valor_total = 0.0
+        tabela_resumo = [["Título / Parcela", "Vencimento", "Valor atualizado"], ["Sem títulos abertos", "-", br_money(0)]]
     else:
         titulos_df["_label"] = titulos_df.apply(_titulo_label_for_notificacao, axis=1)
         titulos_df["_valor_notif"] = titulos_df.apply(_valor_notificacao, axis=1)
-        titulos_labels = titulos_df["_label"].astype(str).dropna().unique().tolist()
-        titulos_lista = ", ".join(titulos_labels) if titulos_labels else "títulos em aberto"
-        vencs = []
-        for v in titulos_df.get("vencimento", pd.Series(dtype=str)).tolist():
-            dt = parse_iso_date(normalize_text(v))
-            if dt:
-                vencs.append(dt.strftime("%d/%m/%Y"))
-        vencimentos_lista = ", ".join(sorted(set(vencs))) or "datas constantes no demonstrativo de cobrança"
+        titulos_df["_venc_fmt"] = titulos_df.get("vencimento", pd.Series(dtype=str)).apply(
+            lambda v: parse_iso_date(normalize_text(v)).strftime("%d/%m/%Y") if parse_iso_date(normalize_text(v)) else "-"
+        )
         valor_total = float(titulos_df["_valor_notif"].sum())
+        tabela_resumo = [["Título / Parcela", "Vencimento", "Valor atualizado"]]
+        for _, row in titulos_df.sort_values(by=["_venc_fmt", "_label"], kind="stable").iterrows():
+            tabela_resumo.append([
+                str(row.get("_label") or "-"),
+                str(row.get("_venc_fmt") or "-"),
+                br_money(row.get("_valor_notif", 0.0)),
+            ])
+        tabela_resumo.append(["TOTAL", "", br_money(valor_total)])
 
-    prazo_frase = f" no prazo de {html.escape(prazo_txt)}" if prazo_txt else ""
+    prazo_frase = f" no prazo de <b>{html.escape(prazo_txt)}</b>" if prazo_txt else ""
 
-    # Base oficial como papel timbrado
     modelo_bytes = base64.b64decode(NOTIFICACAO_MODELO_OFICIAL_B64)
     modelo_pdf = PdfReader(BytesIO(modelo_bytes))
     base_page = modelo_pdf.pages[0]
     width = float(base_page.mediabox.width)
     height = float(base_page.mediabox.height)
 
-    overlay_buffer = BytesIO()
-    c = canvas.Canvas(overlay_buffer, pagesize=(width, height))
-
-    # Remove o corpo de exemplo, preservando timbrado/cabeçalho e rodapé do escritório.
-    c.setFillColor(colors.white)
-    c.rect(48, 82, width - 96, 678, stroke=0, fill=1)
-
-    def draw_para(text: str, x: float, y_top: float, w: float, style: ParagraphStyle) -> float:
-        p = Paragraph(text, style)
-        _, h = p.wrap(w, 500)
-        p.drawOn(c, x, y_top - h)
-        return y_top - h
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=(width, height),
+        leftMargin=70,
+        rightMargin=70,
+        topMargin=70,
+        bottomMargin=115,
+    )
 
     normal = ParagraphStyle(
         "NotifNormal",
@@ -2539,59 +2559,74 @@ def gerar_notificacao_extrajudicial_pdf(
         firstLineIndent=0,
         spaceAfter=0,
     )
-    body = ParagraphStyle(
-        "NotifBody",
-        parent=normal,
-        firstLineIndent=112,
-        leading=19,
-    )
+    body = ParagraphStyle("NotifBody", parent=normal, firstLineIndent=112, leading=19)
     body_no_indent = ParagraphStyle("NotifBodyNoIndent", parent=normal, firstLineIndent=0, leading=19)
-    bold = ParagraphStyle("NotifBold", parent=normal, fontName="Times-Bold", fontSize=10.8, leading=18)
-    ref = ParagraphStyle("NotifRef", parent=normal, fontName="Times-Bold", fontSize=12, leading=15)
-    sign = ParagraphStyle("NotifSign", parent=normal, fontName="Times-Roman", fontSize=10.5, leading=15)
+    bold = ParagraphStyle("NotifBold", parent=normal, fontName="Times-Bold", fontSize=10.8, leading=16, alignment=TA_LEFT)
+    ref = ParagraphStyle("NotifRef", parent=normal, fontName="Times-Bold", fontSize=12, leading=15, alignment=TA_LEFT)
+    sign = ParagraphStyle("NotifSign", parent=normal, fontName="Times-Roman", fontSize=10.5, leading=15, alignment=TA_CENTER)
+    small = ParagraphStyle("NotifSmall", parent=normal, fontSize=10, leading=14, alignment=TA_LEFT)
 
-    x = 70
-    max_w = width - 140
-    y = 718
-
-    # Destinatário e localidade - campos que aparecem em destaque no modelo.
-    c.setFillColor(colors.black)
-    c.setFont("Times-Bold", 10.8)
-    c.drawString(x, y, "À")
-    y -= 23
-    dest_linhas = [destinatario]
+    story = []
+    story.append(Spacer(1, 8))
+    story.append(Paragraph("À", bold))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(html.escape(destinatario), bold))
+    cnpj_txt = normalize_text(cnpj).strip()
+    if cnpj_txt:
+        story.append(Paragraph(f"CNPJ: {html.escape(cnpj_txt)}", small))
     if localidade:
-        dest_linhas.append(localidade)
-    for linha in dest_linhas[:3]:
-        y = draw_para(html.escape(linha), x, y + 9, max_w * 0.65, bold) - 2
+        story.append(Paragraph(html.escape(localidade), bold))
+    story.append(Spacer(1, 12))
+    story.append(Paragraph("Ref. NOTIFICAÇÃO EXTRAJUDICIAL POR INADIMPLÊNCIA - PRAZO", ref))
+    story.append(Spacer(1, 18))
+    story.append(Paragraph("Prezados,", normal))
+    story.append(Spacer(1, 10))
 
-    y = 634
-    y = draw_para("Ref. NOTIFICAÇÃO EXTRAJUDICIAL POR INADIMPLÊNCIA - PRAZO", x, y, max_w, ref)
-    y = 582
-    y = draw_para("Prezados,", x, y, max_w, normal)
-
-    y = 536
     p1 = (
         "A <b>First Medical</b> foi contratada para a prestação de serviços de locação de "
         f"equipamentos médicos em <b>{html.escape(data_contrato_txt)}</b> mediante a contraprestação mensal de "
         f"<b>{html.escape(contraprestacao_txt)}</b>."
     )
-    y = draw_para(p1, x, y, max_w, body) - 22
+    story.append(Paragraph(p1, body))
+    story.append(Spacer(1, 12))
 
     p2 = (
         "Ocorre que segundo informações da instituição bancária responsável pelo recebimento, consta o não "
-        f"pagamento dos títulos <b>{html.escape(titulos_lista)}</b> vencidos em "
-        f"<b>{html.escape(vencimentos_lista)}</b> totalizando o valor de <b>{html.escape(br_money(valor_total))}</b> "
-        "conforme planilha de cálculos do Tribunal de Justiça do Estado de São Paulo em anexo."
+        "pagamento dos títulos relacionados no quadro-resumo abaixo, totalizando o valor de "
+        f"<b>{html.escape(br_money(valor_total))}</b>, conforme planilha de cálculos do Tribunal de Justiça do Estado de São Paulo em anexo."
     )
-    y = draw_para(p2, x, y, max_w, body) - 22
+    story.append(Paragraph(p2, body))
+    story.append(Spacer(1, 12))
+
+    table = Table(tabela_resumo, colWidths=[doc.width * 0.50, doc.width * 0.20, doc.width * 0.30], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9E6F2")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+        ("FONTNAME", (0, 0), (-1, 0), "Times-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+        ("TOPPADDING", (0, 0), (-1, 0), 6),
+        ("GRID", (0, 0), (-1, -1), 0.45, colors.HexColor("#6F7D8C")),
+        ("FONTNAME", (0, 1), (-1, -2), "Times-Roman"),
+        ("FONTSIZE", (0, 1), (-1, -1), 10),
+        ("LEADING", (0, 1), (-1, -1), 12),
+        ("ALIGN", (1, 1), (1, -1), "CENTER"),
+        ("ALIGN", (2, 1), (2, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F7F7F7")]),
+        ("FONTNAME", (0, -1), (-1, -1), "Times-Bold"),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#EEF3F8")),
+    ]))
+    story.append(table)
+    story.append(Spacer(1, 16))
 
     p3 = (
         f"Assim, com o objetivo de constituir a <b>{html.escape(destinatario)}</b> em mora por inadimplência "
         "para fins de cobrança, execução ou falência, serve a presente como derradeira oportunidade de "
         "negociação pacífica do débito através do Termo de Confissão de Dívida e Parcelamento."
     )
-    y = draw_para(p3, x, y, max_w, body) - 22
+    story.append(Paragraph(p3, body))
+    story.append(Spacer(1, 12))
 
     p4 = (
         f"Diante do exposto, fica a <b>{html.escape(destinatario)}</b> Notificada Extrajudicialmente nos termos "
@@ -2599,29 +2634,31 @@ def gerar_notificacao_extrajudicial_pdf(
         f"{prazo_frase} sob pena de rescisão contratual, remoção de equipamentos e adoção das medidas judiciais "
         "que o caso requer."
     )
-    y = draw_para(p4, x, y, max_w, body) - 30
+    story.append(Paragraph(p4, body))
+    story.append(Spacer(1, 24))
+    story.append(Paragraph(f"São Paulo, {data_extenso_pt(data_notificacao)}.", body_no_indent))
+    story.append(Spacer(1, 28))
 
-    y = max(y, 205)
-    y = draw_para(f"São Paulo, {data_extenso_pt(data_notificacao)}.", x + 112, y, max_w - 112, body_no_indent)
-
-    # Redesenha a assinatura dentro do mesmo padrão do modelo.
-    c.setFillColor(colors.black)
     linhas_assinatura = [normalize_text(x) for x in normalize_text(signatario_txt).split("\n") if normalize_text(x)]
     if not linhas_assinatura:
         linhas_assinatura = ["Tiago Esteves da Cunha", "OAB/SP nº 266.999"]
-    c.setFont("Times-Roman", 10.5)
-    assinatura_y = 132
-    for linha in linhas_assinatura[:3]:
-        c.drawCentredString(width / 2, assinatura_y, linha)
-        assinatura_y -= 18
+    for linha in linhas_assinatura[:4]:
+        story.append(Paragraph(html.escape(linha), sign))
 
+    def draw_background(canv, _doc):
+        canv.saveState()
+        canv.setFillColor(colors.white)
+        canv.rect(48, 82, width - 96, 678, stroke=0, fill=1)
+        canv.restoreState()
 
-    c.save()
-    overlay_buffer.seek(0)
-    overlay_pdf = PdfReader(overlay_buffer)
-    base_page.merge_page(overlay_pdf.pages[0])
+    doc.build(story, onFirstPage=draw_background, onLaterPages=draw_background)
+    buffer.seek(0)
+    overlay_pdf = PdfReader(buffer)
     writer = PdfWriter()
-    writer.add_page(base_page)
+    for page in overlay_pdf.pages:
+        merged = deepcopy(base_page)
+        merged.merge_page(page)
+        writer.add_page(merged)
     final_buffer = BytesIO()
     writer.write(final_buffer)
     final_buffer.seek(0)
@@ -2934,6 +2971,14 @@ def aplicar_relatorio_vendedor_titulos_existentes() -> Dict[str, object]:
                 nome_fantasia=fantasia,
                 telefone_financeiro=tel_fin,
                 telefone_comercial=tel_com,
+                endereco=info.get("endereco", ""),
+                bairro=info.get("bairro", ""),
+                municipio=info.get("municipio", ""),
+                uf=info.get("uf", ""),
+                cep=info.get("cep", ""),
+                email_nfe=info.get("email_nfe", ""),
+                email_comercial=info.get("email_comercial", ""),
+                email_financeiro=info.get("email_financeiro", ""),
             )
             clientes_ids.add(new_cid)
 
@@ -3189,6 +3234,14 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
                 nome_fantasia=nome_fantasia_cad,
                 telefone_financeiro=tel_fin_cad,
                 telefone_comercial=tel_com_cad,
+                endereco=cad_cliente_info.get("endereco", ""),
+                bairro=cad_cliente_info.get("bairro", ""),
+                municipio=cad_cliente_info.get("municipio", ""),
+                uf=cad_cliente_info.get("uf", ""),
+                cep=cad_cliente_info.get("cep", ""),
+                email_nfe=cad_cliente_info.get("email_nfe", ""),
+                email_comercial=cad_cliente_info.get("email_comercial", ""),
+                email_financeiro=cad_cliente_info.get("email_financeiro", ""),
                 observacao=obs_cad,
                 tipo_cliente=normalize_text(cad.get("tipo_cliente", "")),
                 cobrador=normalize_text(cad.get("cobrador", "")),
@@ -3499,6 +3552,14 @@ def upsert_cliente_cadastro(
     nome_fantasia: str = "",
     telefone_financeiro: str = "",
     telefone_comercial: str = "",
+    endereco: str = "",
+    bairro: str = "",
+    municipio: str = "",
+    uf: str = "",
+    cep: str = "",
+    email_nfe: str = "",
+    email_comercial: str = "",
+    email_financeiro: str = "",
 ) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     cliente_codigo = format_identifier(cliente_codigo, 6)
@@ -3509,9 +3570,10 @@ def upsert_cliente_cadastro(
         INSERT INTO clientes (
             cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente,
             tipo_cliente, cobrador, observacao, razao_social, cnpj, contato,
-            nome_fantasia, telefone_financeiro, telefone_comercial, created_at, updated_at
+            nome_fantasia, telefone_financeiro, telefone_comercial, endereco, bairro, municipio, uf, cep,
+            email_nfe, email_comercial, email_financeiro, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(cliente_id) DO UPDATE SET
             cliente_codigo = excluded.cliente_codigo,
             loja = excluded.loja,
@@ -3527,13 +3589,23 @@ def upsert_cliente_cadastro(
             nome_fantasia = CASE WHEN excluded.nome_fantasia != '' THEN excluded.nome_fantasia ELSE COALESCE(clientes.nome_fantasia, '') END,
             telefone_financeiro = CASE WHEN excluded.telefone_financeiro != '' THEN excluded.telefone_financeiro ELSE COALESCE(clientes.telefone_financeiro, '') END,
             telefone_comercial = CASE WHEN excluded.telefone_comercial != '' THEN excluded.telefone_comercial ELSE COALESCE(clientes.telefone_comercial, '') END,
+            endereco = CASE WHEN excluded.endereco != '' THEN excluded.endereco ELSE COALESCE(clientes.endereco, '') END,
+            bairro = CASE WHEN excluded.bairro != '' THEN excluded.bairro ELSE COALESCE(clientes.bairro, '') END,
+            municipio = CASE WHEN excluded.municipio != '' THEN excluded.municipio ELSE COALESCE(clientes.municipio, '') END,
+            uf = CASE WHEN excluded.uf != '' THEN excluded.uf ELSE COALESCE(clientes.uf, '') END,
+            cep = CASE WHEN excluded.cep != '' THEN excluded.cep ELSE COALESCE(clientes.cep, '') END,
+            email_nfe = CASE WHEN excluded.email_nfe != '' THEN excluded.email_nfe ELSE COALESCE(clientes.email_nfe, '') END,
+            email_comercial = CASE WHEN excluded.email_comercial != '' THEN excluded.email_comercial ELSE COALESCE(clientes.email_comercial, '') END,
+            email_financeiro = CASE WHEN excluded.email_financeiro != '' THEN excluded.email_financeiro ELSE COALESCE(clientes.email_financeiro, '') END,
             updated_at = excluded.updated_at
         """,
         (
             cid, cliente_codigo, loja, upper_text(nome_cliente), upper_text(vendedor), upper_text(gerente),
             (tipo_cliente or "").strip(), upper_text(cobrador), upper_text(observacao), upper_text(razao_social),
             upper_text(cnpj), upper_text(contato), upper_text(nome_fantasia),
-            upper_text(telefone_financeiro), upper_text(telefone_comercial), now, now,
+            upper_text(telefone_financeiro), upper_text(telefone_comercial), upper_text(endereco), upper_text(bairro),
+            upper_text(municipio), upper_text(uf), upper_text(cep), upper_text(email_nfe), upper_text(email_comercial),
+            upper_text(email_financeiro), now, now,
         ),
     )
 
@@ -3543,7 +3615,8 @@ def get_cliente_cadastro_map(conn: sqlite3.Connection) -> Dict[str, Dict[str, st
         """
         SELECT cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente, observacao,
                tipo_cliente, cobrador, razao_social, cnpj, contato, nome_fantasia,
-               telefone_financeiro, telefone_comercial
+               telefone_financeiro, telefone_comercial, endereco, bairro, municipio, uf, cep,
+               email_nfe, email_comercial, email_financeiro
           FROM clientes
         """,
         conn,
@@ -3562,12 +3635,14 @@ def get_cliente_cadastro_map(conn: sqlite3.Connection) -> Dict[str, Dict[str, st
         current_score = sum(bool(normalize_text(current.get(c, ""))) for c in [
             "vendedor", "gerente", "observacao", "tipo_cliente", "cobrador",
             "razao_social", "cnpj", "contato", "nome_fantasia",
-            "telefone_financeiro", "telefone_comercial"
+            "telefone_financeiro", "telefone_comercial", "endereco", "bairro", "municipio", "uf", "cep",
+            "email_nfe", "email_comercial", "email_financeiro"
         ])
         new_score = sum(bool(normalize_text(data.get(c, ""))) for c in [
             "vendedor", "gerente", "observacao", "tipo_cliente", "cobrador",
             "razao_social", "cnpj", "contato", "nome_fantasia",
-            "telefone_financeiro", "telefone_comercial"
+            "telefone_financeiro", "telefone_comercial", "endereco", "bairro", "municipio", "uf", "cep",
+            "email_nfe", "email_comercial", "email_financeiro"
         ])
         if new_score >= current_score:
             result[key] = data
@@ -3845,6 +3920,14 @@ def save_cliente_all(
     nome_fantasia: str,
     telefone_financeiro: str,
     telefone_comercial: str,
+    endereco: str,
+    bairro: str,
+    municipio: str,
+    uf: str,
+    cep: str,
+    email_nfe: str,
+    email_comercial: str,
+    email_financeiro: str,
     vendedor: str,
     gerente: str,
     observacao_cliente: str,
@@ -3877,6 +3960,14 @@ def save_cliente_all(
         nome_fantasia = upper_text(nome_fantasia)
         telefone_financeiro = upper_text(telefone_financeiro)
         telefone_comercial = upper_text(telefone_comercial)
+        endereco = upper_text(endereco)
+        bairro = upper_text(bairro)
+        municipio = upper_text(municipio)
+        uf = upper_text(uf)
+        cep = upper_text(cep)
+        email_nfe = upper_text(email_nfe)
+        email_comercial = upper_text(email_comercial)
+        email_financeiro = upper_text(email_financeiro)
         vendedor = upper_text(vendedor)
         gerente = upper_text(gerente)
         observacao_cliente = upper_text(observacao_cliente)
@@ -3889,9 +3980,10 @@ def save_cliente_all(
             INSERT INTO clientes (
                 cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente, tipo_cliente, cobrador,
                 observacao, razao_social, cnpj, contato, nome_fantasia, telefone_financeiro,
-                telefone_comercial, created_at, updated_at
+                telefone_comercial, endereco, bairro, municipio, uf, cep, email_nfe, email_comercial,
+                email_financeiro, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(cliente_id) DO UPDATE SET
                 cliente_codigo = excluded.cliente_codigo,
                 loja = excluded.loja,
@@ -3907,12 +3999,21 @@ def save_cliente_all(
                 nome_fantasia = excluded.nome_fantasia,
                 telefone_financeiro = excluded.telefone_financeiro,
                 telefone_comercial = excluded.telefone_comercial,
+                endereco = excluded.endereco,
+                bairro = excluded.bairro,
+                municipio = excluded.municipio,
+                uf = excluded.uf,
+                cep = excluded.cep,
+                email_nfe = excluded.email_nfe,
+                email_comercial = excluded.email_comercial,
+                email_financeiro = excluded.email_financeiro,
                 updated_at = excluded.updated_at
             """,
             (
                 cid, format_identifier(cliente_codigo, 6), format_identifier(loja, 2), nome_cliente,
                 vendedor, gerente, tipo_cliente, cobrador, observacao_cliente, razao_social, cnpj,
-                contato, nome_fantasia, telefone_financeiro, telefone_comercial, now, now
+                contato, nome_fantasia, telefone_financeiro, telefone_comercial, endereco, bairro, municipio, uf, cep,
+                email_nfe, email_comercial, email_financeiro, now, now
             ),
         )
 
@@ -4193,6 +4294,14 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
         nome_fantasia = str(cad.get("nome_fantasia", "") or _join_unique(grp.get("nome_fantasia", pd.Series(dtype=str)), limite=1) or nome_cliente)
         telefone_financeiro = str(cad.get("telefone_financeiro", "") or _join_unique(grp.get("telefone_financeiro", pd.Series(dtype=str)), limite=1) or "")
         telefone_comercial = str(cad.get("telefone_comercial", "") or _join_unique(grp.get("telefone_comercial", pd.Series(dtype=str)), limite=1) or "")
+        endereco = str(cad.get("endereco", "") or "")
+        bairro = str(cad.get("bairro", "") or "")
+        municipio = str(cad.get("municipio", "") or "")
+        uf = str(cad.get("uf", "") or "")
+        cep = str(cad.get("cep", "") or "")
+        email_nfe = str(cad.get("email_nfe", "") or "")
+        email_comercial = str(cad.get("email_comercial", "") or "")
+        email_financeiro = str(cad.get("email_financeiro", "") or "")
         acao = get_action_for_day(max_ciclo, str(grp["status"].iloc[0]), promessa_cliente, ref)
         rows.append({
             "cliente_id": f"{cliente_codigo}|{loja}|{nome_cliente}",
@@ -4219,6 +4328,14 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
             "nome_fantasia": nome_fantasia,
             "telefone_financeiro": telefone_financeiro,
             "telefone_comercial": telefone_comercial,
+            "endereco": endereco,
+            "bairro": bairro,
+            "municipio": municipio,
+            "uf": uf,
+            "cep": cep,
+            "email_nfe": email_nfe,
+            "email_comercial": email_comercial,
+            "email_financeiro": email_financeiro,
             "valor_prioridade": float(grp["saldo_atual"].sum()) * (max_dias + 1),
         })
     out = pd.DataFrame(rows)
@@ -4819,6 +4936,14 @@ elif page == "Cliente":
         contato_padrao = str(selected.get("contato", "") or "")
         telefone_financeiro_padrao = str(selected.get("telefone_financeiro", "") or "")
         telefone_comercial_padrao = str(selected.get("telefone_comercial", "") or "")
+        endereco_padrao = str(selected.get("endereco", "") or "")
+        bairro_padrao = str(selected.get("bairro", "") or "")
+        municipio_padrao = str(selected.get("municipio", "") or "")
+        uf_padrao = str(selected.get("uf", "") or "")
+        cep_padrao = str(selected.get("cep", "") or "")
+        email_financeiro_padrao = str(selected.get("email_financeiro", "") or "")
+        email_comercial_padrao = str(selected.get("email_comercial", "") or "")
+        email_nfe_padrao = str(selected.get("email_nfe", "") or "")
         vendedor_padrao = str(selected["vendedor"] or "")
         gerente_padrao = str(selected["gerente"] or "")
         obs_padrao = ""
@@ -4849,6 +4974,13 @@ elif page == "Cliente":
             tel1, tel2 = st.columns(2)
             telefone_financeiro = tel1.text_input("Telefone financeiro", value=telefone_financeiro_padrao, key=f"telefone_financeiro_{widget_cliente_key}")
             telefone_comercial = tel2.text_input("Telefone comercial", value=telefone_comercial_padrao, key=f"telefone_comercial_{widget_cliente_key}")
+            em1, em2 = st.columns(2)
+            email_financeiro = em1.text_input("E-mail financeiro", value=email_financeiro_padrao, key=f"email_financeiro_{widget_cliente_key}")
+            email_comercial = em2.text_input("E-mail comercial", value=email_comercial_padrao, key=f"email_comercial_{widget_cliente_key}")
+            e1, e2, e3 = st.columns([2, 1, 1])
+            endereco = e1.text_input("Endereço", value=endereco_padrao, key=f"endereco_{widget_cliente_key}")
+            municipio = e2.text_input("Município", value=municipio_padrao, key=f"municipio_{widget_cliente_key}")
+            uf = e3.text_input("UF", value=uf_padrao, key=f"uf_{widget_cliente_key}")
 
             r1, r2 = st.columns(2)
             vendedor = r1.text_input("Vendedor", value=vendedor_padrao, key=f"vendedor_{widget_cliente_key}")
@@ -4897,6 +5029,14 @@ elif page == "Cliente":
                     nome_fantasia=nome_fantasia,
                     telefone_financeiro=telefone_financeiro,
                     telefone_comercial=telefone_comercial,
+                    endereco=endereco,
+                    bairro=bairro_padrao,
+                    municipio=municipio,
+                    uf=uf,
+                    cep=cep_padrao,
+                    email_financeiro=email_financeiro,
+                    email_comercial=email_comercial,
+                    email_nfe=email_nfe_padrao,
                     vendedor=vendedor,
                     gerente=gerente,
                     observacao_cliente=obs_atual,
