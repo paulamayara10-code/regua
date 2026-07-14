@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v6.6 LTS"
+APP_VERSION = "v6.7 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -81,6 +81,7 @@ ACTION_OPTIONS = [
     "Encaminhado ao jurídico",
     "Pagamento identificado manualmente",
     "Agendar retorno",
+    "Observação registrada",
     "Outro",
 ]
 
@@ -3399,6 +3400,25 @@ def load_historico(titulo_id: Optional[str] = None) -> pd.DataFrame:
     return df
 
 
+def contar_historico_cliente(cliente_codigo: str, loja: str, nome_cliente: str) -> int:
+    """Conta registros de histórico vinculados aos títulos do cliente, para validação pós-salvamento."""
+    conn = get_conn()
+    try:
+        where, params = _cliente_where_clause(cliente_codigo, loja, nome_cliente)
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS total
+              FROM historico_acoes h
+              JOIN titulos t ON t.titulo_id = h.titulo_id
+             WHERE {where}
+            """,
+            params,
+        ).fetchone()
+        return int(row["total"] if row else 0)
+    finally:
+        conn.close()
+
+
 
 def update_cliente_meta(cliente_codigo: str, loja: str, nome_cliente: str, tipo_cliente: str, cobrador: str) -> None:
     """Salva tipo de cliente e responsável da cobrança no cadastro do cliente."""
@@ -3973,6 +3993,16 @@ def save_cliente_all(
         observacao_cliente = upper_text(observacao_cliente)
         responsavel_acao = upper_text(responsavel_acao or cobrador or current_user_name() or "Financeiro")
         observacao_acao = upper_text(clean_history_text(observacao_acao or ""))
+
+        # Segurança operacional: se a usuária digitou uma observação de ação, ela deve ir para o histórico,
+        # mesmo que tenha esquecido de trocar o seletor que vem como "Não registrar ação agora".
+        # A observação geral do cliente continua sendo salva como cadastro; a observação da ação vira histórico.
+        if observacao_acao and (not tipo_acao or tipo_acao == "Não registrar ação agora"):
+            tipo_acao = "Observação registrada"
+        if agendar_retorno and (not tipo_acao or tipo_acao == "Não registrar ação agora"):
+            tipo_acao = "Agendar retorno"
+            if not observacao_acao:
+                observacao_acao = upper_text(clean_history_text(motivo_retorno or "RETORNO PROGRAMADO"))
 
         # Cadastro do cliente: grava exatamente o que está na tela.
         conn.execute(
@@ -5017,6 +5047,7 @@ elif page == "Cliente":
             salvar_tudo = st.form_submit_button("Salvar todas as alterações", type="primary", use_container_width=True)
 
             if salvar_tudo:
+                historico_antes = contar_historico_cliente(cliente_codigo, loja, nome_cliente)
                 resultado = save_cliente_all(
                     cliente_codigo=cliente_codigo,
                     loja=loja,
@@ -5049,8 +5080,13 @@ elif page == "Cliente":
                     data_retorno=retorno if agendar_retorno else None,
                     motivo_retorno=motivo_retorno,
                 )
+                historico_depois = contar_historico_cliente(cliente_codigo, loja, nome_cliente)
                 checkpoint_cliente = secure_save_checkpoint("salvar_cliente")
                 mensagens = [f"Dados salvos em {resultado['titulos_atualizados']} título(s) aberto(s)."]
+                if int(resultado.get("acoes_registradas", 0)) and historico_depois <= historico_antes:
+                    st.error("Atenção: a ação foi solicitada, mas a validação não encontrou novo histórico. Não feche a tela e comunique o administrador.")
+                elif historico_depois > historico_antes:
+                    mensagens.append(f"Histórico validado (+{historico_depois - historico_antes} registro(s)).")
                 if int(resultado.get("acoes_registradas", 0)):
                     mensagens.append(f"Ação registrada para {resultado['acoes_registradas']} título(s).")
                 if resultado.get("agenda") == "atualizada":
