@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v6.7 LTS"
+APP_VERSION = "v6.8 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -3815,6 +3815,7 @@ def build_standard_collection_report(df: pd.DataFrame) -> pd.DataFrame:
         "vencimento": "", "banco_status": "", "valor_titulo": 0.0, "saldo_atual": 0.0,
         "saldo_corrigido": 0.0, "multa": 0.0, "juros": 0.0, "dias_atraso": 0,
         "observacao_atual": "", "telefone_financeiro": "", "telefone_comercial": "",
+        "vendedor": "", "gerente": "", "segmento": "",
     }
     for col, default in defaults.items():
         if col not in base.columns:
