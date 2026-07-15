@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v6.8 LTS"
+APP_VERSION = "v6.9 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -135,7 +135,8 @@ st.markdown(
             box-shadow: 0 18px 45px rgba(15,39,66,0.20); position: relative; overflow: hidden;
         }
         .first-header:after {content:""; position:absolute; right:-70px; top:-90px; width:260px; height:260px; border-radius:50%; background:rgba(255,255,255,.12);}        
-        .first-header h1 {margin: 0; font-size: 34px; font-weight: 900; letter-spacing: -.03em;}
+        .first-header h1 {margin: 0; font-size: 34px; font-weight: 900; letter-spacing: -.03em; color: #FFFFFF !important;}
+        .first-header h1 * {color: #FFFFFF !important;}
         .first-header p {margin: 7px 0 0 0; opacity: .94; font-weight: 600;}
         .first-chip {display:inline-flex; align-items:center; gap:8px; background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.22); border-radius: 999px; padding: 7px 12px; margin-top: 14px; font-size: 13px; font-weight: 750;}
         .section-title {font-size: 20px; font-weight: 850; color: #0B2341; margin: 18px 0 10px 0; letter-spacing: -.01em;}
@@ -3798,7 +3799,8 @@ def _display_parcela(value) -> str:
 def build_standard_collection_report(df: pd.DataFrame) -> pd.DataFrame:
     """Monta o relatório operacional na ordem solicitada pela equipe."""
     headers = [
-        "Codigo-Lj-Nome do Cliente", "N Fantasia", "Nome", "Prf-Numero\nParcela", "TP",
+        "Codigo-Lj-Nome do Cliente", "N Fantasia", "Nome", "Vendedor", "Gerente", "Segmento",
+        "Prf-Numero\nParcela", "TP",
         "Data de\nEmissao", "Vencto\nTitulo", "Vencto\nReal", "Bco St", "Valor Original",
         "Tit Vencidos\nValor Atual", "Titulos a Vencer\nValor Atual",
         "Tit Vencidos\nValor Corrigido", "Dias\nAtraso", "Hist.Cobranc",
@@ -3860,6 +3862,9 @@ def build_standard_collection_report(df: pd.DataFrame) -> pd.DataFrame:
             "Codigo-Lj-Nome do Cliente": f"{codigo}-{loja}-{nome_composto}".strip("-"),
             "N Fantasia": fantasia,
             "Nome": razao,
+            "Vendedor": canonical_vendor_display(r.get("vendedor")) or upper_text(r.get("vendedor")),
+            "Gerente": canonical_manager_display(r.get("gerente")) or upper_text(r.get("gerente")),
+            "Segmento": canonical_segment_display(r.get("segmento")) or upper_text(r.get("segmento")),
             "Prf-Numero\nParcela": f"{prefixo}-{numero}\n{parcela}".strip("-\n"),
             "TP": upper_text(r.get("tipo")),
             "Data de\nEmissao": emissao,
