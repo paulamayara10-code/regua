@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v6.9 LTS"
+APP_VERSION = "v7.0 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -2521,12 +2521,17 @@ def gerar_notificacao_extrajudicial_pdf(
     else:
         titulos_df["_label"] = titulos_df.apply(_titulo_label_for_notificacao, axis=1)
         titulos_df["_valor_notif"] = titulos_df.apply(_valor_notificacao, axis=1)
-        titulos_df["_venc_fmt"] = titulos_df.get("vencimento", pd.Series(dtype=str)).apply(
-            lambda v: parse_iso_date(normalize_text(v)).strftime("%d/%m/%Y") if parse_iso_date(normalize_text(v)) else "-"
+        def _venc_date_for_sort(v):
+            dt = parse_iso_date(normalize_text(v))
+            return dt if dt else date.max
+
+        titulos_df["_venc_date_sort"] = titulos_df.get("vencimento", pd.Series(dtype=str)).apply(_venc_date_for_sort)
+        titulos_df["_venc_fmt"] = titulos_df["_venc_date_sort"].apply(
+            lambda dt: dt.strftime("%d/%m/%Y") if dt and dt != date.max else "-"
         )
         valor_total = float(titulos_df["_valor_notif"].sum())
         tabela_resumo = [["Título / Parcela", "Vencimento", "Valor atualizado"]]
-        for _, row in titulos_df.sort_values(by=["_venc_fmt", "_label"], kind="stable").iterrows():
+        for _, row in titulos_df.sort_values(by=["_venc_date_sort", "_label"], kind="stable").iterrows():
             tabela_resumo.append([
                 str(row.get("_label") or "-"),
                 str(row.get("_venc_fmt") or "-"),
