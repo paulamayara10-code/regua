@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v7.7 LTS"
+APP_VERSION = "v7.9 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -412,6 +412,10 @@ def github_get_file_bytes(path: str) -> Tuple[Optional[bytes], str]:
     try:
         info = _github_request(url, cfg["token"], "GET")
         content = base64.b64decode(info.get("content", "")) if info.get("content") else None
+        if not content and info.get("download_url"):
+            req = Request(info["download_url"], headers={"Authorization": f"Bearer {cfg['token']}", "User-Agent": "crm-cobranca-first"})
+            with urlopen(req, timeout=60) as resp:
+                content = resp.read()
         return content, f"Arquivo encontrado no GitHub: {path}"
     except HTTPError as e:
         if e.code == 404:
@@ -2699,10 +2703,6 @@ def gerar_notificacao_extrajudicial_pdf(
                 x_qr = width - 132
                 y_qr = 96
                 renderPDF.draw(drawing, canv, x_qr, y_qr)
-                canv.setFont("Times-Roman", 8.5)
-                canv.setFillColor(colors.HexColor("#333333"))
-                canv.drawCentredString(x_qr + qr_size / 2, y_qr - 10, "Acesse o link da reunião")
-                canv.drawCentredString(x_qr + qr_size / 2, y_qr - 20, "para negociação")
             except Exception:
                 pass
         canv.restoreState()
@@ -4610,8 +4610,39 @@ def _set_xlsx_cell_value(sheet_root, cell_ref: str, value, ns_main: str) -> None
         v_el.text = str(float(value)) if isinstance(value, float) else str(value)
 
 
+def _remove_calc_chain_references(xml_bytes: bytes, filename: str) -> bytes:
+    """Remove referências ao calcChain para o Excel recalcular sem acusar corrupção."""
+    try:
+        if filename == "[Content_Types].xml":
+            ns = "http://schemas.openxmlformats.org/package/2006/content-types"
+            ET.register_namespace('', ns)
+            root = ET.fromstring(xml_bytes)
+            for child in list(root):
+                if child.attrib.get("PartName") == "/xl/calcChain.xml":
+                    root.remove(child)
+            return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+        if filename == "xl/_rels/workbook.xml.rels":
+            ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+            ET.register_namespace('', ns)
+            root = ET.fromstring(xml_bytes)
+            for child in list(root):
+                target = str(child.attrib.get("Target", ""))
+                rel_type = str(child.attrib.get("Type", ""))
+                if target.endswith("calcChain.xml") or rel_type.endswith("/calcChain"):
+                    root.remove(child)
+            return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    except Exception:
+        return xml_bytes
+    return xml_bytes
+
+
 def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame, cliente_nome: str, data_calculo: date) -> bytes:
-    """Preenche o modelo Cálculo Inicial FUABC.xlsm com os títulos do cliente, preservando fórmulas/estrutura."""
+    """Preenche o modelo Cálculo Inicial FUABC.xlsm preservando estrutura e compatibilidade com Excel.
+
+    A versão anterior preenchia os campos, mas mantinha o calcChain antigo do Excel.
+    Em alguns ambientes isso fazia o Excel acusar arquivo corrompido. Agora o CRM
+    remove o calcChain e força recálculo ao abrir a planilha.
+    """
     if not template_bytes:
         raise ValueError("Envie o modelo .xlsm de cálculo.")
     tit = titulos_df.copy() if titulos_df is not None else pd.DataFrame()
@@ -4624,14 +4655,28 @@ def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame,
     tit["_valor_calc"] = tit.apply(_valor_notificacao, axis=1)
     tit = tit.sort_values(["_venc_sort", "numero_titulo", "parcela"], kind="stable")
 
-    zin = zipfile.ZipFile(BytesIO(template_bytes), "r")
+    try:
+        zin = zipfile.ZipFile(BytesIO(template_bytes), "r")
+        bad = zin.testzip()
+        if bad:
+            raise ValueError(f"O modelo .xlsm está com problema interno no arquivo: {bad}")
+    except zipfile.BadZipFile as exc:
+        raise ValueError("O modelo enviado não é um .xlsm válido.") from exc
+
     output = BytesIO()
     ns_main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
     ET.register_namespace('', ns_main)
     ET.register_namespace('r', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships')
+    ET.register_namespace('mc', 'http://schemas.openxmlformats.org/markup-compatibility/2006')
+    ET.register_namespace('x14ac', 'http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac')
 
-    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zout:
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zout:
         for item in zin.infolist():
+            # O calcChain antigo pode ficar incompatível após alterar células de entrada.
+            # Excel recria esse arquivo automaticamente ao abrir/recalcular.
+            if item.filename == "xl/calcChain.xml":
+                continue
+
             data = zin.read(item.filename)
             if item.filename == "xl/worksheets/sheet1.xml":
                 root = ET.fromstring(data)
@@ -4656,11 +4701,27 @@ def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame,
                 calc.attrib["fullCalcOnLoad"] = "1"
                 calc.attrib["forceFullCalc"] = "1"
                 data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-            zout.writestr(item, data)
+            elif item.filename in {"[Content_Types].xml", "xl/_rels/workbook.xml.rels"}:
+                data = _remove_calc_chain_references(data, item.filename)
+
+            zi = zipfile.ZipInfo(item.filename, item.date_time)
+            zi.compress_type = zipfile.ZIP_DEFLATED
+            zi.external_attr = item.external_attr
+            zi.comment = item.comment
+            zout.writestr(zi, data)
     zin.close()
     output.seek(0)
-    return output.getvalue()
 
+    # Validação final do pacote ZIP antes de entregar para download.
+    try:
+        with zipfile.ZipFile(BytesIO(output.getvalue()), "r") as zcheck:
+            bad = zcheck.testzip()
+            if bad:
+                raise ValueError(f"Arquivo gerado com problema interno em: {bad}")
+    except zipfile.BadZipFile as exc:
+        raise ValueError("O arquivo gerado não ficou em formato Excel válido.") from exc
+
+    return output.getvalue()
 
 def safe_xlsm_name(cliente_nome: str, data_calculo: date) -> str:
     return f"calculo_tjsp_{safe_filename(cliente_nome)}_{data_calculo.strftime('%Y%m%d')}.xlsm"
