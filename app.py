@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v8.8 LTS"
+APP_VERSION = "v8.9 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -3258,6 +3258,8 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
         atualizados = 0
         base_bi_cruzados = 0
         base_bi_nao_localizados = 0
+        cadastro_clientes_cruzados = 0
+        rel_vendedor_cruzados = 0
 
         for _, row in df.iterrows():
             tid = str(row["titulo_id"])
@@ -3268,6 +3270,11 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
             auto_info = get_faturamento_info_for(row, faturamento_maps)
             cad_info = get_relatorio_vendedor_info_for(row, rel_vendedor_maps)
             cad_cliente_info = get_cadastro_cliente_info_for(row, cadastro_clientes_maps)
+
+            if cad_cliente_info:
+                cadastro_clientes_cruzados += 1
+            if cad_info:
+                rel_vendedor_cruzados += 1
 
             cliente_codigo = cad_info.get("cliente_codigo") or cad_cliente_info.get("cliente_codigo") or format_identifier(raw_code, 6)
             loja = cad_info.get("loja") or cad_cliente_info.get("loja") or format_identifier(raw_loja, 2)
@@ -3330,14 +3337,14 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
                 nome_fantasia=nome_fantasia_cad,
                 telefone_financeiro=tel_fin_cad,
                 telefone_comercial=tel_com_cad,
-                endereco=cad_cliente_info.get("endereco", ""),
-                bairro=cad_cliente_info.get("bairro", ""),
-                municipio=cad_cliente_info.get("municipio", ""),
-                uf=cad_cliente_info.get("uf", ""),
-                cep=cad_cliente_info.get("cep", ""),
-                email_nfe=cad_cliente_info.get("email_nfe", ""),
-                email_comercial=cad_cliente_info.get("email_comercial", ""),
-                email_financeiro=cad_cliente_info.get("email_financeiro", ""),
+                endereco=cad_cliente_info.get("endereco", "") or cad.get("endereco", ""),
+                bairro=cad_cliente_info.get("bairro", "") or cad.get("bairro", ""),
+                municipio=cad_cliente_info.get("municipio", "") or cad.get("municipio", ""),
+                uf=cad_cliente_info.get("uf", "") or cad.get("uf", ""),
+                cep=cad_cliente_info.get("cep", "") or cad.get("cep", ""),
+                email_nfe=cad_cliente_info.get("email_nfe", "") or cad.get("email_nfe", ""),
+                email_comercial=cad_cliente_info.get("email_comercial", "") or cad.get("email_comercial", ""),
+                email_financeiro=cad_cliente_info.get("email_financeiro", "") or cad.get("email_financeiro", ""),
                 observacao=obs_cad,
                 tipo_cliente=normalize_text(cad.get("tipo_cliente", "")),
                 cobrador=normalize_text(cad.get("cobrador", "")),
@@ -3457,7 +3464,7 @@ def process_upload(df: pd.DataFrame, data_ref: date, arquivo_nome: str) -> Tuple
             )
 
         valor_aberto = float(df["Saldo a receber"].sum())
-        status_fontes = f"{faturamento_status} | {rel_vendedor_status}"
+        status_fontes = f"{faturamento_status} | {rel_vendedor_status} | {cadastro_clientes_status} | Enriquecimento automático: novos títulos buscam BASE BI, relatório por vendedor e cadastro de clientes no upload. Cadastro cruzado: {cadastro_clientes_cruzados}; relatório vendedor cruzado: {rel_vendedor_cruzados}"
         cur.execute(
             """
             INSERT INTO uploads (data_referencia, arquivo, qtd_linhas, novos, atualizados, pagos, valor_aberto, base_bi_cruzados, base_bi_nao_localizados, base_bi_status, created_at)
