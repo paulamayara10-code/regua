@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v8.4 LTS"
+APP_VERSION = "v8.6 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -1011,6 +1011,11 @@ def init_db() -> None:
     ensure_column("clientes", "email_nfe", "TEXT DEFAULT ''")
     ensure_column("clientes", "email_comercial", "TEXT DEFAULT ''")
     ensure_column("clientes", "email_financeiro", "TEXT DEFAULT ''")
+    ensure_column("clientes", "notif_data_contrato", "TEXT DEFAULT ''")
+    ensure_column("clientes", "notif_contraprestacao", "TEXT DEFAULT ''")
+    ensure_column("clientes", "notif_prazo", "TEXT DEFAULT ''")
+    ensure_column("clientes", "notif_teams_link", "TEXT DEFAULT ''")
+    ensure_column("clientes", "notif_assinatura", "TEXT DEFAULT ''")
     ensure_column("titulos", "razao_social", "TEXT DEFAULT ''")
     ensure_column("titulos", "cnpj", "TEXT DEFAULT ''")
     ensure_column("titulos", "contato", "TEXT DEFAULT ''")
@@ -3639,6 +3644,82 @@ def make_cliente_id(cliente_codigo: str, loja: str, nome_cliente: str) -> str:
     return f"{codigo}|{loja_fmt}|{nome}"
 
 
+def get_notificacao_memoria_cliente(cliente_codigo: str, loja: str, nome_cliente: str) -> Dict[str, str]:
+    """Carrega informações recorrentes da notificação para o cliente."""
+    cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT notif_data_contrato, notif_contraprestacao, notif_prazo, notif_teams_link, notif_assinatura
+              FROM clientes
+             WHERE cliente_id = ?
+            """,
+            (cid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return {}
+    return {
+        "notif_data_contrato": row["notif_data_contrato"] or "",
+        "notif_contraprestacao": row["notif_contraprestacao"] or "",
+        "notif_prazo": row["notif_prazo"] or "",
+        "notif_teams_link": row["notif_teams_link"] or "",
+        "notif_assinatura": row["notif_assinatura"] or "",
+    }
+
+
+def salvar_notificacao_memoria_cliente(
+    cliente_codigo: str,
+    loja: str,
+    nome_cliente: str,
+    data_contrato: str,
+    contraprestacao: str,
+    prazo: str,
+    teams_link: str,
+    assinatura: str,
+) -> None:
+    """Salva informações recorrentes da notificação no cadastro do cliente."""
+    cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
+    now = datetime.now().isoformat(timespec="seconds")
+    conn = get_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO clientes (
+                cliente_id, cliente_codigo, loja, nome_cliente,
+                notif_data_contrato, notif_contraprestacao, notif_prazo, notif_teams_link, notif_assinatura,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cliente_id) DO UPDATE SET
+                notif_data_contrato = excluded.notif_data_contrato,
+                notif_contraprestacao = excluded.notif_contraprestacao,
+                notif_prazo = excluded.notif_prazo,
+                notif_teams_link = excluded.notif_teams_link,
+                notif_assinatura = excluded.notif_assinatura,
+                updated_at = excluded.updated_at
+            """,
+            (
+                cid,
+                format_identifier(cliente_codigo, 6),
+                format_identifier(loja, 2),
+                normalize_text(nome_cliente),
+                normalize_text(data_contrato).strip(),
+                normalize_text(contraprestacao).strip(),
+                normalize_text(prazo).strip(),
+                str(teams_link or "").strip(),
+                normalize_text(assinatura).strip(),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def load_clientes() -> pd.DataFrame:
     conn = get_conn()
     df = pd.read_sql_query("SELECT * FROM clientes ORDER BY nome_cliente", conn)
@@ -3726,7 +3807,8 @@ def get_cliente_cadastro_map(conn: sqlite3.Connection) -> Dict[str, Dict[str, st
         SELECT cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente, observacao,
                tipo_cliente, cobrador, razao_social, cnpj, contato, nome_fantasia,
                telefone_financeiro, telefone_comercial, endereco, bairro, municipio, uf, cep,
-               email_nfe, email_comercial, email_financeiro
+               email_nfe, email_comercial, email_financeiro,
+               notif_data_contrato, notif_contraprestacao, notif_prazo, notif_teams_link, notif_assinatura
           FROM clientes
         """,
         conn,
@@ -4427,6 +4509,11 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
         email_nfe = str(cad.get("email_nfe", "") or "")
         email_comercial = str(cad.get("email_comercial", "") or "")
         email_financeiro = str(cad.get("email_financeiro", "") or "")
+        notif_data_contrato = str(cad.get("notif_data_contrato", "") or "")
+        notif_contraprestacao = str(cad.get("notif_contraprestacao", "") or "")
+        notif_prazo = str(cad.get("notif_prazo", "") or "")
+        notif_teams_link = str(cad.get("notif_teams_link", "") or "")
+        notif_assinatura = str(cad.get("notif_assinatura", "") or "")
         acao = get_action_for_day(max_ciclo, str(grp["status"].iloc[0]), promessa_cliente, ref)
         rows.append({
             "cliente_id": f"{cliente_codigo}|{loja}|{nome_cliente}",
@@ -4461,6 +4548,11 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
             "email_nfe": email_nfe,
             "email_comercial": email_comercial,
             "email_financeiro": email_financeiro,
+            "notif_data_contrato": notif_data_contrato,
+            "notif_contraprestacao": notif_contraprestacao,
+            "notif_prazo": notif_prazo,
+            "notif_teams_link": notif_teams_link,
+            "notif_assinatura": notif_assinatura,
             "notas_cliente": ", ".join(sorted(set([normalize_note_key(v) for v in grp.get("numero_titulo", pd.Series(dtype=str)).tolist() if normalize_note_key(v)]))),
             "razoes_busca": " ".join([str(razao_social or ""), str(nome_fantasia or ""), str(nome_cliente or "")]),
             "valor_prioridade": float(grp["saldo_atual"].sum()) * (max_dias + 1),
@@ -4772,7 +4864,68 @@ def _recalcular_xlsm_com_libreoffice(xlsm_bytes: bytes) -> Tuple[bytes, str]:
         return xlsm_bytes, "Recalculo no servidor não gerou novo arquivo; arquivo marcado para recalcular ao abrir no Excel."
 
 
-def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame, cliente_nome: str, data_calculo: date, razao_social: str = "") -> tuple[bytes, str]:
+
+def _excel_safe_percentual(value) -> Optional[float]:
+    """Converte percentual digitado no app para formato aceito pelo Excel."""
+    txt = normalize_text(value).replace("%", "").replace(".", "").replace(",", ".").strip()
+    if not txt:
+        return None
+    try:
+        val = float(txt)
+    except Exception:
+        return None
+    # No Excel da planilha, 12% normalmente deve ser 12,0% = 0,12 quando formatado como percentual.
+    # Se a usuária digitar 12, gravamos 0.12; se digitar 0.12, mantemos 0.12.
+    if val > 1:
+        val = val / 100
+    return val
+
+
+def _maior_data_indices_workbook(wb) -> Optional[date]:
+    """Procura, de forma conservadora, a maior data encontrada nas abas de índices."""
+    maior = None
+    try:
+        sheets = [ws for ws in wb.worksheets if "IND" in normalize_text(ws.title).upper()]
+        if not sheets and len(wb.worksheets) > 1:
+            sheets = wb.worksheets[1:]
+        for ws in sheets:
+            max_row = min(ws.max_row or 1, 2500)
+            max_col = min(ws.max_column or 1, 30)
+            for row in ws.iter_rows(min_row=1, max_row=max_row, min_col=1, max_col=max_col):
+                for cell in row:
+                    v = cell.value
+                    dt = None
+                    if isinstance(v, datetime):
+                        dt = v.date()
+                    elif isinstance(v, date):
+                        dt = v
+                    elif isinstance(v, str):
+                        dt = parse_iso_date(normalize_text(v))
+                    if dt and dt.year >= 1990:
+                        maior = dt if maior is None or dt > maior else maior
+    except Exception:
+        return None
+    return maior
+
+
+def _validar_parametros_calculo_tjsp(wb, data_calculo: date, tabela_correcao: str) -> str:
+    """Gera aviso preventivo sobre índices e parâmetros que impedem o cálculo."""
+    avisos = []
+    maior_indice = _maior_data_indices_workbook(wb)
+    if maior_indice:
+        primeiro_mes_calculo = date(data_calculo.year, data_calculo.month, 1)
+        if date(maior_indice.year, maior_indice.month, 1) < primeiro_mes_calculo:
+            avisos.append(
+                "Atenção: a aba de índices parece ir até "
+                f"{maior_indice.strftime('%m/%Y')}. Se a data final for {data_calculo.strftime('%m/%Y')}, "
+                "o Índice Final pode ficar zerado; use modelo mais atualizado ou calcule até o último mês disponível."
+            )
+    if not normalize_text(tabela_correcao).strip():
+        avisos.append("Atenção: tabela de correção monetária não informada.")
+    return " ".join(avisos)
+
+
+def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame, cliente_nome: str, data_calculo: date, razao_social: str = "", natureza_calculo: str = "CIVEL / PENAL", juros_opcao: str = "CC/02 (6% até 10/1/3; 12%)", juros_percentual: str = "", tabela_correcao: str = "TABELA PRÁTICA - INPC", juros_precedem_vencimento: str = "Não", termo_inicial_juros: Optional[date] = None) -> tuple[bytes, str]:
     """Preenche o modelo Cálculo Inicial FUABC.xlsm preservando compatibilidade com Excel.
 
     A geração por manipulação direta do XML funcionava para alguns modelos, mas
@@ -4815,11 +4968,24 @@ def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame,
     # Usa a primeira aba, mantendo a estrutura original do modelo.
     ws = wb.worksheets[0]
 
-    # Campos principais do modelo.
+    # Campos principais do modelo, conforme orientação da planilha TJSP.
     reu_completo = normalize_text(razao_social or cliente_nome).upper()
     ws["D19"] = data_calculo
+    ws["B23"] = normalize_text(natureza_calculo or "CIVEL / PENAL")
+    ws["K20"] = normalize_text(juros_opcao or "CC/02 (6% até 10/1/3; 12%)")
+    perc_juros = _excel_safe_percentual(juros_percentual)
+    if perc_juros is not None:
+        ws["N20"] = perc_juros
     ws["D29"] = "AUTORA: FIRST MEDICAL SERVICE LTDA"
     ws["D30"] = f"RÉU: {reu_completo}"
+
+    # Bloco principal da condenação: para múltiplas parcelas vencidas, por padrão
+    # os juros não precedem os vencimentos e as datas ficam na coluna B.
+    ws["L35"] = normalize_text(tabela_correcao or "TABELA PRÁTICA - INPC")
+    ws["O34"] = normalize_text(juros_precedem_vencimento or "Não")
+    ws["L37"] = termo_inicial_juros if termo_inicial_juros else None
+
+    validacao_msg = _validar_parametros_calculo_tjsp(wb, data_calculo, tabela_correcao)
 
     # Limpa apenas os campos de entrada que o CRM preenche. Não mexe nas fórmulas.
     for row_num in range(40, 610):
@@ -4869,7 +5035,10 @@ def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame,
     except zipfile.BadZipFile as exc:
         raise ValueError("O arquivo gerado não ficou em formato Excel válido.") from exc
 
-    return generated, recalc_msg
+    msg_final = recalc_msg
+    if validacao_msg:
+        msg_final = f"{msg_final} {validacao_msg}".strip()
+    return generated, msg_final
 
 def safe_xlsm_name(cliente_nome: str, data_calculo: date) -> str:
     return f"calculo_tjsp_{safe_filename(cliente_nome)}_{data_calculo.strftime('%Y%m%d')}.xlsm"
@@ -5340,6 +5509,12 @@ elif page == "Cliente":
         st.markdown("#### Notificação extrajudicial")
         st.caption("Modelo oficial: mantém o timbrado e a redação-base, preenchendo apenas os campos variáveis.")
         with st.expander("Preencher e baixar notificação", expanded=False):
+            notif_memoria = get_notificacao_memoria_cliente(cliente_codigo, loja, nome_cliente)
+            notif_memorizar = st.checkbox(
+                "Memorizar dados da notificação para este cliente",
+                value=True,
+                key=f"notif_memorizar_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None,
+            )
             notif_c1, notif_c2 = st.columns(2)
             notif_dest = notif_c1.text_input(
                 "Destinatário / razão social",
@@ -5353,25 +5528,36 @@ elif page == "Cliente":
             )
             notif_c3, notif_c4, notif_c5 = st.columns([1.2, 1.2, 1])
             notif_data = notif_c3.date_input("Data da notificação", value=data_ref, format="DD/MM/YYYY", key=f"notif_data_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
-            notif_contrato = notif_c4.text_input("Data/contrato de locação", value="", placeholder="Ex.: 01/01/2021", key=f"notif_contrato_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
-            notif_prazo = notif_c5.text_input("Prazo", value="", placeholder="Ex.: 5 dias úteis", key=f"notif_prazo_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
+            notif_contrato = notif_c4.text_input("Data/contrato de locação", value=str(notif_memoria.get("notif_data_contrato", "")), placeholder="Ex.: 01/01/2021", key=f"notif_contrato_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
+            notif_prazo = notif_c5.text_input("Prazo", value=str(notif_memoria.get("notif_prazo", "")), placeholder="Ex.: 5 dias úteis", key=f"notif_prazo_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
             notif_c6, notif_c7 = st.columns(2)
             _notif_endereco_padrao = montar_endereco_completo_cliente(selected)
-            notif_mensal = notif_c6.text_input("Contraprestação mensal", value="", placeholder="Opcional", key=f"notif_mensal_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
+            notif_mensal = notif_c6.text_input("Contraprestação mensal", value=str(notif_memoria.get("notif_contraprestacao", "")), placeholder="Opcional", key=f"notif_mensal_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
             notif_endereco = notif_c7.text_input("Endereço completo do cliente", value=_notif_endereco_padrao, placeholder="Endereço, bairro, cidade/UF e CEP", key=f"notif_endereco_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
             notif_teams = st.text_input(
                 "Link da reunião no Teams (opcional)",
-                value="",
+                value=str(notif_memoria.get("notif_teams_link", "")),
                 placeholder="Cole aqui o link da reunião para gerar um QR Code na carta",
                 key=f"notif_teams_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None,
             )
             notif_sign = st.text_area(
                 "Assinatura",
-                value="Tiago Esteves da Cunha\nOAB/SP nº 266.999",
+                value=str(notif_memoria.get("notif_assinatura", "") or "Tiago Esteves da Cunha\nOAB/SP nº 266.999"),
                 height=68,
                 key=f"notif_sign_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None,
             )
             try:
+                if notif_memorizar:
+                    salvar_notificacao_memoria_cliente(
+                        cliente_codigo=cliente_codigo,
+                        loja=loja,
+                        nome_cliente=nome_cliente,
+                        data_contrato=notif_contrato,
+                        contraprestacao=notif_mensal,
+                        prazo=notif_prazo,
+                        teams_link=notif_teams,
+                        assinatura=notif_sign,
+                    )
                 pdf_bytes = gerar_notificacao_extrajudicial_pdf(
                     cliente_nome=nome_cliente,
                     razao_social=notif_dest,
@@ -5392,6 +5578,8 @@ elif page == "Cliente":
                     mime="application/pdf",
                     use_container_width=True,
                 )
+                if notif_memorizar:
+                    st.caption("Dados recorrentes salvos para este cliente.")
             except Exception as exc:
                 st.error(f"Não foi possível gerar a notificação: {exc}")
 
@@ -5776,6 +5964,59 @@ elif page == "Cálculo TJSP":
             "saldo_atual": "Valor atual", "valor_titulo": "Valor original"
         }), use_container_width=True, hide_index=True)
 
+        st.markdown("#### Parâmetros do cálculo")
+        st.caption("O CRM preenche os campos verdes principais do modelo TJSP antes de gerar a planilha.")
+
+        p1, p2 = st.columns([1, 1])
+        natureza_calc = p1.selectbox(
+            "Natureza do cálculo — célula B23",
+            ["CIVEL / PENAL", "FAZENDÁRIO"],
+            index=0,
+            key="calc_tjsp_natureza",
+        )
+        tabela_calc = p2.selectbox(
+            "Tabela de correção — célula L35",
+            ["TABELA PRÁTICA - INPC", "Tabela IPC (FIPE)", "IGP-M (FGV)", "IGP-DI (FGV)", "IPCA-E"],
+            index=0,
+            key="calc_tjsp_tabela",
+        )
+
+        p3, p4, p5 = st.columns([1.4, 0.8, 0.8])
+        juros_opcao_calc = p3.selectbox(
+            "Juros — célula K20",
+            ["CC/02 (6% até 10/1/3; 12%)", "Fixados (% a.a.)"],
+            index=0,
+            key="calc_tjsp_juros_opcao",
+        )
+        juros_percentual_calc = p4.text_input(
+            "Percentual — N20",
+            value="",
+            placeholder="Só se juros fixados",
+            key="calc_tjsp_juros_percentual",
+        )
+        juros_precedem_calc = p5.selectbox(
+            "Juros precedem vencimento? — O34",
+            ["Não", "Sim"],
+            index=0,
+            key="calc_tjsp_juros_precedem",
+        )
+
+        usar_termo_unico = st.checkbox(
+            "Informar termo inicial único dos juros — célula L37",
+            value=False,
+            key="calc_tjsp_usar_l37",
+        )
+        termo_inicial_calc = None
+        if usar_termo_unico:
+            termo_inicial_calc = st.date_input(
+                "Termo inicial dos juros",
+                value=data_calc,
+                format="DD/MM/YYYY",
+                key="calc_tjsp_termo_juros",
+            )
+        else:
+            st.caption("Para títulos parcelados, a configuração padrão mantém L37 vazio e usa os vencimentos da coluna B.")
+
         st.markdown("#### Gerar planilha")
         st.caption("Para deixar o CRM mais rápido, o modelo .xlsm só é carregado e preenchido quando você clicar em gerar.")
 
@@ -5801,8 +6042,19 @@ elif page == "Cálculo TJSP":
                             cliente_nome=str(selecionado_calc.get("nome_cliente", "CLIENTE")),
                             data_calculo=data_calc,
                             razao_social=reu_calculo,
+                            natureza_calculo=natureza_calc,
+                            juros_opcao=juros_opcao_calc,
+                            juros_percentual=juros_percentual_calc,
+                            tabela_correcao=tabela_calc,
+                            juros_precedem_vencimento=juros_precedem_calc,
+                            termo_inicial_juros=termo_inicial_calc,
                         )
-                    st.success(f"Planilha preenchida. Réu: {reu_calculo}. {modelo_status} {recalc_msg}")
+                    st.success(f"Planilha preenchida. Réu: {reu_calculo}. {modelo_status}")
+                    if recalc_msg:
+                        if "Atenção:" in recalc_msg:
+                            st.warning(recalc_msg)
+                        else:
+                            st.info(recalc_msg)
                     st.download_button(
                         "Baixar cálculo preenchido",
                         data=xlsm_bytes,
