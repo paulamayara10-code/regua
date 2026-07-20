@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v8.6 LTS"
+APP_VERSION = "v8.7 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -4969,21 +4969,22 @@ def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame,
     ws = wb.worksheets[0]
 
     # Campos principais do modelo, conforme orientação da planilha TJSP.
+    # Observação: o modelo atual usa I20/J20 para juros, I35 para tabela e I37 para termo inicial.
     reu_completo = normalize_text(razao_social or cliente_nome).upper()
     ws["D19"] = data_calculo
     ws["B23"] = normalize_text(natureza_calculo or "CIVEL / PENAL")
-    ws["K20"] = normalize_text(juros_opcao or "CC/02 (6% até 10/1/3; 12%)")
+    ws["I20"] = normalize_text(juros_opcao or "CC/02 (6%ªª até 10/1/3; 12%ªª até 29/8/24; depois, Selic menos correção)")
     perc_juros = _excel_safe_percentual(juros_percentual)
     if perc_juros is not None:
-        ws["N20"] = perc_juros
+        ws["J20"] = perc_juros
     ws["D29"] = "AUTORA: FIRST MEDICAL SERVICE LTDA"
     ws["D30"] = f"RÉU: {reu_completo}"
 
     # Bloco principal da condenação: para múltiplas parcelas vencidas, por padrão
     # os juros não precedem os vencimentos e as datas ficam na coluna B.
-    ws["L35"] = normalize_text(tabela_correcao or "TABELA PRÁTICA - INPC")
+    ws["I35"] = normalize_text(tabela_correcao or "TABELA PRÁTICA - INPC")
     ws["O34"] = normalize_text(juros_precedem_vencimento or "Não")
-    ws["L37"] = termo_inicial_juros if termo_inicial_juros else None
+    ws["I37"] = termo_inicial_juros if termo_inicial_juros else None
 
     validacao_msg = _validar_parametros_calculo_tjsp(wb, data_calculo, tabela_correcao)
 
@@ -5975,21 +5976,21 @@ elif page == "Cálculo TJSP":
             key="calc_tjsp_natureza",
         )
         tabela_calc = p2.selectbox(
-            "Tabela de correção — célula L35",
-            ["TABELA PRÁTICA - INPC", "Tabela IPC (FIPE)", "IGP-M (FGV)", "IGP-DI (FGV)", "IPCA-E"],
+            "Tabela de correção — célula I35",
+            ["TABELA PRÁTICA - INPC", "INPC+IPCA-E (desde set./24)", "Tabela IPC (FIPE)", "IGP-M (FGV)", "IGP-DI (FGV)", "IPCA-E"],
             index=0,
             key="calc_tjsp_tabela",
         )
 
         p3, p4, p5 = st.columns([1.4, 0.8, 0.8])
         juros_opcao_calc = p3.selectbox(
-            "Juros — célula K20",
-            ["CC/02 (6% até 10/1/3; 12%)", "Fixados (% a.a.)"],
+            "Juros — célula I20",
+            ["CC/02 (6%ªª até 10/1/3; 12%ªª até 29/8/24; depois, Selic menos correção)", "Fixados (% a.a.)"],
             index=0,
             key="calc_tjsp_juros_opcao",
         )
         juros_percentual_calc = p4.text_input(
-            "Percentual — N20",
+            "Percentual — J20",
             value="",
             placeholder="Só se juros fixados",
             key="calc_tjsp_juros_percentual",
@@ -6002,7 +6003,7 @@ elif page == "Cálculo TJSP":
         )
 
         usar_termo_unico = st.checkbox(
-            "Informar termo inicial único dos juros — célula L37",
+            "Informar termo inicial único dos juros — célula I37",
             value=False,
             key="calc_tjsp_usar_l37",
         )
@@ -6015,7 +6016,7 @@ elif page == "Cálculo TJSP":
                 key="calc_tjsp_termo_juros",
             )
         else:
-            st.caption("Para títulos parcelados, a configuração padrão mantém L37 vazio e usa os vencimentos da coluna B.")
+            st.caption("Para títulos parcelados, a configuração padrão mantém I37 vazio e usa os vencimentos da coluna B.")
 
         st.markdown("#### Gerar planilha")
         st.caption("Para deixar o CRM mais rápido, o modelo .xlsm só é carregado e preenchido quando você clicar em gerar.")
@@ -6049,21 +6050,37 @@ elif page == "Cálculo TJSP":
                             juros_precedem_vencimento=juros_precedem_calc,
                             termo_inicial_juros=termo_inicial_calc,
                         )
-                    st.success(f"Planilha preenchida. Réu: {reu_calculo}. {modelo_status}")
-                    if recalc_msg:
-                        if "Atenção:" in recalc_msg:
-                            st.warning(recalc_msg)
-                        else:
-                            st.info(recalc_msg)
-                    st.download_button(
-                        "Baixar cálculo preenchido",
-                        data=xlsm_bytes,
-                        file_name=safe_xlsm_name(str(selecionado_calc.get("nome_cliente", "CLIENTE")), data_calc),
-                        mime="application/vnd.ms-excel.sheet.macroEnabled.12",
-                        use_container_width=True,
-                    )
+                    st.session_state["calculo_tjsp_download"] = {
+                        "bytes": xlsm_bytes,
+                        "file_name": safe_xlsm_name(str(selecionado_calc.get("nome_cliente", "CLIENTE")), data_calc),
+                        "reu": reu_calculo,
+                        "modelo_status": modelo_status,
+                        "recalc_msg": recalc_msg,
+                        "created_at": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+                    }
             except Exception as exc:
                 st.error(f"Não consegui gerar a planilha: {exc}")
+
+        download_calc = st.session_state.get("calculo_tjsp_download")
+        if download_calc:
+            st.success(f"Planilha pronta para baixar. Réu: {download_calc.get('reu', '')}. Gerada em {download_calc.get('created_at', '')}.")
+            if download_calc.get("modelo_status"):
+                st.caption(str(download_calc.get("modelo_status")))
+            recalc_msg = str(download_calc.get("recalc_msg", "") or "")
+            if recalc_msg:
+                if "Atenção:" in recalc_msg:
+                    st.warning(recalc_msg)
+                else:
+                    st.info(recalc_msg)
+            st.download_button(
+                "Baixar cálculo preenchido",
+                data=download_calc.get("bytes", b""),
+                file_name=download_calc.get("file_name", "calculo_tjsp.xlsm"),
+                mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                use_container_width=True,
+                key="download_calculo_tjsp_persistente",
+                on_click="ignore",
+            )
 
 elif page == "Carteira":
     st.markdown("### Carteira comercial")
