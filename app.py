@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v7.9 LTS"
+APP_VERSION = "v8.0 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -4637,14 +4637,16 @@ def _remove_calc_chain_references(xml_bytes: bytes, filename: str) -> bytes:
 
 
 def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame, cliente_nome: str, data_calculo: date) -> bytes:
-    """Preenche o modelo Cálculo Inicial FUABC.xlsm preservando estrutura e compatibilidade com Excel.
+    """Preenche o modelo Cálculo Inicial FUABC.xlsm preservando compatibilidade com Excel.
 
-    A versão anterior preenchia os campos, mas mantinha o calcChain antigo do Excel.
-    Em alguns ambientes isso fazia o Excel acusar arquivo corrompido. Agora o CRM
-    remove o calcChain e força recálculo ao abrir a planilha.
+    A geração por manipulação direta do XML funcionava para alguns modelos, mas
+    continuava gerando aviso de corrupção em determinados Excels. Esta versão usa
+    o próprio mecanismo do openpyxl com keep_vba=True, preservando o pacote .xlsm,
+    fórmulas, estilos e macros do modelo oficial.
     """
     if not template_bytes:
         raise ValueError("Envie o modelo .xlsm de cálculo.")
+
     tit = titulos_df.copy() if titulos_df is not None else pd.DataFrame()
     if tit.empty:
         raise ValueError("Não há títulos abertos para preencher no cálculo.")
@@ -4655,73 +4657,74 @@ def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame,
     tit["_valor_calc"] = tit.apply(_valor_notificacao, axis=1)
     tit = tit.sort_values(["_venc_sort", "numero_titulo", "parcela"], kind="stable")
 
+    # Valida o pacote de entrada antes de abrir no Excel writer.
     try:
-        zin = zipfile.ZipFile(BytesIO(template_bytes), "r")
-        bad = zin.testzip()
-        if bad:
-            raise ValueError(f"O modelo .xlsm está com problema interno no arquivo: {bad}")
+        with zipfile.ZipFile(BytesIO(template_bytes), "r") as z:
+            bad = z.testzip()
+            if bad:
+                raise ValueError(f"O modelo .xlsm está com problema interno no arquivo: {bad}")
     except zipfile.BadZipFile as exc:
         raise ValueError("O modelo enviado não é um .xlsm válido.") from exc
 
-    output = BytesIO()
-    ns_main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-    ET.register_namespace('', ns_main)
-    ET.register_namespace('r', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships')
-    ET.register_namespace('mc', 'http://schemas.openxmlformats.org/markup-compatibility/2006')
-    ET.register_namespace('x14ac', 'http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac')
-
-    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zout:
-        for item in zin.infolist():
-            # O calcChain antigo pode ficar incompatível após alterar células de entrada.
-            # Excel recria esse arquivo automaticamente ao abrir/recalcular.
-            if item.filename == "xl/calcChain.xml":
-                continue
-
-            data = zin.read(item.filename)
-            if item.filename == "xl/worksheets/sheet1.xml":
-                root = ET.fromstring(data)
-                _set_xlsx_cell_value(root, "D19", _excel_serial_from_date(data_calculo), ns_main)
-                _set_xlsx_cell_value(root, "D29", "AUTORA: FIRST MEDICAL SERVICE LTDA", ns_main)
-                _set_xlsx_cell_value(root, "D30", f"RÉU: {normalize_text(cliente_nome).upper()}", ns_main)
-                for row_num in range(40, 610):
-                    _set_xlsx_cell_value(root, f"B{row_num}", None, ns_main)
-                    _set_xlsx_cell_value(root, f"D{row_num}", None, ns_main)
-                for i, (_, row) in enumerate(tit.iterrows(), start=40):
-                    venc = row.get("_venc_sort")
-                    serial_venc = _excel_serial_from_date(venc) if venc != date.max else None
-                    _set_xlsx_cell_value(root, f"B{i}", serial_venc, ns_main)
-                    _set_xlsx_cell_value(root, f"D{i}", float(row.get("_valor_calc", 0) or 0), ns_main)
-                data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-            elif item.filename == "xl/workbook.xml":
-                root = ET.fromstring(data)
-                calc = root.find(f"{{{ns_main}}}calcPr")
-                if calc is None:
-                    calc = ET.SubElement(root, f"{{{ns_main}}}calcPr")
-                calc.attrib["calcMode"] = "auto"
-                calc.attrib["fullCalcOnLoad"] = "1"
-                calc.attrib["forceFullCalc"] = "1"
-                data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-            elif item.filename in {"[Content_Types].xml", "xl/_rels/workbook.xml.rels"}:
-                data = _remove_calc_chain_references(data, item.filename)
-
-            zi = zipfile.ZipInfo(item.filename, item.date_time)
-            zi.compress_type = zipfile.ZIP_DEFLATED
-            zi.external_attr = item.external_attr
-            zi.comment = item.comment
-            zout.writestr(zi, data)
-    zin.close()
-    output.seek(0)
-
-    # Validação final do pacote ZIP antes de entregar para download.
     try:
-        with zipfile.ZipFile(BytesIO(output.getvalue()), "r") as zcheck:
+        from openpyxl import load_workbook
+    except Exception as exc:
+        raise RuntimeError("Inclua openpyxl no requirements.txt para preencher o modelo .xlsm.") from exc
+
+    try:
+        wb = load_workbook(BytesIO(template_bytes), keep_vba=True)
+    except Exception as exc:
+        raise ValueError(f"Não consegui abrir o modelo .xlsm pelo mecanismo do Excel: {exc}") from exc
+
+    # Usa a primeira aba, mantendo a estrutura original do modelo.
+    ws = wb.worksheets[0]
+
+    # Campos principais do modelo.
+    ws["D19"] = data_calculo
+    ws["D29"] = "AUTORA: FIRST MEDICAL SERVICE LTDA"
+    ws["D30"] = f"RÉU: {normalize_text(cliente_nome).upper()}"
+
+    # Limpa apenas os campos de entrada que o CRM preenche. Não mexe nas fórmulas.
+    for row_num in range(40, 610):
+        ws[f"B{row_num}"] = None
+        ws[f"D{row_num}"] = None
+
+    for i, (_, row) in enumerate(tit.iterrows(), start=40):
+        venc = row.get("_venc_sort")
+        ws[f"B{i}"] = venc if venc != date.max else None
+        ws[f"D{i}"] = float(row.get("_valor_calc", 0) or 0)
+
+    # Força recálculo ao abrir no Excel sem tentar recalcular dentro do Python.
+    try:
+        wb.calculation.fullCalcOnLoad = True
+        wb.calculation.forceFullCalc = True
+        wb.calculation.calcMode = "auto"
+    except Exception:
+        pass
+
+    output = BytesIO()
+    try:
+        wb.save(output)
+    except Exception as exc:
+        raise ValueError(f"Não consegui salvar o .xlsm preenchido: {exc}") from exc
+
+    output.seek(0)
+    generated = output.getvalue()
+
+    # Validação final do pacote gerado. Isso não garante que o Excel vá recalcular,
+    # mas garante que o arquivo entregue não está quebrado como ZIP/Office Open XML.
+    try:
+        with zipfile.ZipFile(BytesIO(generated), "r") as zcheck:
             bad = zcheck.testzip()
             if bad:
                 raise ValueError(f"Arquivo gerado com problema interno em: {bad}")
+            names = set(zcheck.namelist())
+            if "[Content_Types].xml" not in names or "xl/workbook.xml" not in names:
+                raise ValueError("Arquivo gerado não contém a estrutura básica de uma planilha Excel.")
     except zipfile.BadZipFile as exc:
         raise ValueError("O arquivo gerado não ficou em formato Excel válido.") from exc
 
-    return output.getvalue()
+    return generated
 
 def safe_xlsm_name(cliente_nome: str, data_calculo: date) -> str:
     return f"calculo_tjsp_{safe_filename(cliente_nome)}_{data_calculo.strftime('%Y%m%d')}.xlsm"
