@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v7.2 LTS"
+APP_VERSION = "v7.3 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -2622,10 +2622,11 @@ def gerar_notificacao_extrajudicial_pdf(
 
     def draw_background(canv, _doc):
         canv.saveState()
-        # Limpa a área do texto variável do modelo, incluindo o "À" original,
-        # mas preservando o logotipo/cabeçalho superior do escritório.
+        # Limpa somente a área do texto variável do modelo, incluindo o "À" original,
+        # sem avançar sobre o logotipo/cabeçalho superior do escritório.
+        # O topo da limpeza fica abaixo da marca, preservando também o texto "ADVOGADOS".
         canv.setFillColor(colors.white)
-        canv.rect(48, 90, width - 96, 685, stroke=0, fill=1)
+        canv.rect(48, 82, width - 96, 650, stroke=0, fill=1)
         canv.restoreState()
 
     doc.build(story, onFirstPage=draw_background, onLaterPages=draw_background)
