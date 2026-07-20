@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v8.7 LTS"
+APP_VERSION = "v8.8 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -6079,7 +6079,6 @@ elif page == "Cálculo TJSP":
                 mime="application/vnd.ms-excel.sheet.macroEnabled.12",
                 use_container_width=True,
                 key="download_calculo_tjsp_persistente",
-                on_click="ignore",
             )
 
 elif page == "Carteira":
