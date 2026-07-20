@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v8.0 LTS"
+APP_VERSION = "v8.1 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -5628,33 +5628,38 @@ elif page == "Cálculo TJSP":
             "saldo_atual": "Valor atual", "valor_titulo": "Valor original"
         }), use_container_width=True, hide_index=True)
 
-        modelo_fixo_bytes, modelo_fixo_status = find_modelo_calculo_tjsp_bytes()
-        if modelo_fixo_bytes:
-            st.success(modelo_fixo_status)
-            st.caption("Modelo oficial localizado automaticamente. O CRM preserva as fórmulas e preenche apenas datas e valores dos títulos.")
-        else:
-            st.warning(modelo_fixo_status)
-            st.caption("Se preferir, envie o modelo manualmente abaixo enquanto o arquivo não estiver fixo no GitHub.")
+        st.markdown("#### Gerar planilha")
+        st.caption("Para deixar o CRM mais rápido, o modelo .xlsm só é carregado e preenchido quando você clicar em gerar.")
 
         modelo_xlsm = st.file_uploader("Substituir modelo manualmente (.xlsm) — opcional", type=["xlsm"], key="modelo_calculo_tjsp")
-        template_bytes = modelo_xlsm.read() if modelo_xlsm is not None else modelo_fixo_bytes
+        gerar_calculo = st.button("Gerar cálculo preenchido", type="primary", use_container_width=True, key="btn_gerar_calculo_tjsp")
 
-        if template_bytes is not None:
+        if gerar_calculo:
             try:
-                xlsm_bytes = preencher_calculo_tjsp_xlsm(
-                    template_bytes=template_bytes,
-                    titulos_df=tit_calc,
-                    cliente_nome=str(selecionado_calc.get("nome_cliente", "CLIENTE")),
-                    data_calculo=data_calc,
-                )
-                st.success("Planilha preenchida. Ao abrir no Excel, habilite o cálculo/edição para atualizar as fórmulas do modelo.")
-                st.download_button(
-                    "Baixar cálculo preenchido",
-                    data=xlsm_bytes,
-                    file_name=safe_xlsm_name(str(selecionado_calc.get("nome_cliente", "CLIENTE")), data_calc),
-                    mime="application/vnd.ms-excel.sheet.macroEnabled.12",
-                    use_container_width=True,
-                )
+                if modelo_xlsm is not None:
+                    template_bytes = modelo_xlsm.read()
+                    modelo_status = "Modelo enviado manualmente."
+                else:
+                    template_bytes, modelo_status = find_modelo_calculo_tjsp_bytes()
+
+                if not template_bytes:
+                    st.warning(modelo_status)
+                else:
+                    with st.spinner("Gerando planilha do cálculo..."):
+                        xlsm_bytes = preencher_calculo_tjsp_xlsm(
+                            template_bytes=template_bytes,
+                            titulos_df=tit_calc,
+                            cliente_nome=str(selecionado_calc.get("nome_cliente", "CLIENTE")),
+                            data_calculo=data_calc,
+                        )
+                    st.success(f"Planilha preenchida. {modelo_status}")
+                    st.download_button(
+                        "Baixar cálculo preenchido",
+                        data=xlsm_bytes,
+                        file_name=safe_xlsm_name(str(selecionado_calc.get("nome_cliente", "CLIENTE")), data_calc),
+                        mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                        use_container_width=True,
+                    )
             except Exception as exc:
                 st.error(f"Não consegui gerar a planilha: {exc}")
 
