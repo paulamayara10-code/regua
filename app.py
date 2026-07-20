@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v7.5 LTS"
+APP_VERSION = "v7.7 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -1606,6 +1606,58 @@ def normalize_note_key(value) -> str:
 
 
 
+def find_modelo_calculo_tjsp_bytes() -> Tuple[Optional[bytes], str]:
+    """Localiza automaticamente o modelo oficial de cálculo TJSP (.xlsm)."""
+    configured = get_config("modelo_calculo_tjsp_github", "").strip() if DB_PATH.exists() else ""
+
+    local_candidates = [
+        Path("Cálculo Inicial FUABC.xlsm"),
+        Path("Calculo Inicial FUABC.xlsm"),
+        Path("dados/Cálculo Inicial FUABC.xlsm"),
+        Path("dados/Calculo Inicial FUABC.xlsm"),
+        Path("modelo_calculo_tjsp.xlsm"),
+        Path("dados/modelo_calculo_tjsp.xlsm"),
+    ]
+    for cand in local_candidates:
+        if cand.exists() and cand.is_file():
+            data = cand.read_bytes()
+            if len(data) >= 500:
+                return data, f"Modelo local: {cand.as_posix()}"
+
+    if configured:
+        if configured.lower().startswith(("http://", "https://")):
+            try:
+                with urlopen(configured, timeout=35) as response:
+                    data = response.read()
+                if len(data) >= 500:
+                    return data, "Modelo de cálculo carregado pela URL configurada"
+            except Exception as e:
+                return None, f"Erro ao ler o modelo de cálculo pela URL: {e}"
+        data, msg = github_get_file_bytes(configured)
+        if data and len(data) >= 500:
+            return data, msg
+
+    github_candidates = [
+        "Cálculo Inicial FUABC.xlsm", "Calculo Inicial FUABC.xlsm",
+        "dados/Cálculo Inicial FUABC.xlsm", "dados/Calculo Inicial FUABC.xlsm",
+        "modelo_calculo_tjsp.xlsm", "dados/modelo_calculo_tjsp.xlsm",
+    ]
+    for cand in github_candidates:
+        data, msg = github_get_file_bytes(cand)
+        if data and len(data) >= 500:
+            return data, msg
+
+    for base_dir in ["", "dados"]:
+        for path in github_list_file_paths(base_dir):
+            key = _file_name_key(path)
+            if path.lower().endswith(".xlsm") and "calculo" in key and ("fuabc" in key or "tjsp" in key):
+                data, msg = github_get_file_bytes(path)
+                if data and len(data) >= 500:
+                    return data, msg
+
+    return None, "Modelo de cálculo TJSP não encontrado. Coloque o .xlsm na raiz do GitHub ou na pasta dados/."
+
+
 def looks_like_vendedor_codigo(value) -> bool:
     """Identifica códigos comerciais que não devem aparecer no relatório como nome."""
     txt = normalize_text(value).upper().strip()
@@ -2483,6 +2535,7 @@ def gerar_notificacao_extrajudicial_pdf(
     contraprestacao_txt: str = "",
     prazo_txt: str = "",
     signatario_txt: str = "Tiago Esteves da Cunha\nOAB/SP nº 266.999",
+    teams_link: str = "",
 ) -> bytes:
     """Gera a notificação extrajudicial usando o PDF oficial como timbrado.
 
@@ -2497,6 +2550,9 @@ def gerar_notificacao_extrajudicial_pdf(
         from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT, TA_CENTER
         from reportlab.lib.styles import ParagraphStyle
         from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+        from reportlab.graphics.barcode import qr
+        from reportlab.graphics.shapes import Drawing
+        from reportlab.graphics import renderPDF
         from pypdf import PdfReader, PdfWriter
     except Exception as exc:
         raise RuntimeError("Inclua reportlab>=4.0.0 e pypdf>=4.0.0 no requirements.txt.") from exc
@@ -2507,6 +2563,7 @@ def gerar_notificacao_extrajudicial_pdf(
     data_contrato_txt = normalize_text(data_contrato_txt).strip() or "____/____/________"
     contraprestacao_txt = normalize_text(contraprestacao_txt).strip() or "R$ __________"
     prazo_txt = normalize_text(prazo_txt).strip()
+    teams_link = str(teams_link or "").strip()
 
     titulos_df = titulos_cliente.copy() if titulos_cliente is not None else pd.DataFrame()
     if titulos_df.empty:
@@ -2629,6 +2686,25 @@ def gerar_notificacao_extrajudicial_pdf(
         canv.setFillColor(colors.white)
         canv.rect(48, 82, width - 96, 650, stroke=0, fill=1)
         canv.rect(45, 718, 125, 58, stroke=0, fill=1)
+
+        if teams_link and canv.getPageNumber() == 1:
+            try:
+                qr_widget = qr.QrCodeWidget(teams_link)
+                bounds = qr_widget.getBounds()
+                qr_size = 74
+                w = bounds[2] - bounds[0]
+                h = bounds[3] - bounds[1]
+                drawing = Drawing(qr_size, qr_size, transform=[qr_size / w, 0, 0, qr_size / h, 0, 0])
+                drawing.add(qr_widget)
+                x_qr = width - 132
+                y_qr = 96
+                renderPDF.draw(drawing, canv, x_qr, y_qr)
+                canv.setFont("Times-Roman", 8.5)
+                canv.setFillColor(colors.HexColor("#333333"))
+                canv.drawCentredString(x_qr + qr_size / 2, y_qr - 10, "Acesse o link da reunião")
+                canv.drawCentredString(x_qr + qr_size / 2, y_qr - 20, "para negociação")
+            except Exception:
+                pass
         canv.restoreState()
 
     doc.build(story, onFirstPage=draw_background, onLaterPages=draw_background)
@@ -4448,6 +4524,147 @@ def metric_card(label: str, value: str, help_text: str = "", long_text: bool = F
     )
 
 
+
+# -----------------------------------------------------------------------------
+# Planilha de cálculo TJSP - preenchimento automático
+# -----------------------------------------------------------------------------
+def _excel_serial_from_date(value) -> Optional[int]:
+    """Converte data para serial do Excel, preservando compatibilidade com o modelo XLSM."""
+    dt = value if isinstance(value, date) else parse_iso_date(normalize_text(value))
+    if not dt:
+        return None
+    return (dt - date(1899, 12, 30)).days
+
+
+def _column_letters_to_index(col_letters: str) -> int:
+    idx = 0
+    for ch in col_letters.upper():
+        if ch.isalpha():
+            idx = idx * 26 + (ord(ch) - ord("A") + 1)
+    return idx
+
+
+def _cell_ref_to_col_row(ref: str) -> Tuple[str, int]:
+    m = re.match(r"^([A-Z]+)(\d+)$", ref.upper())
+    if not m:
+        return "A", 1
+    return m.group(1), int(m.group(2))
+
+
+def _set_xlsx_cell_value(sheet_root, cell_ref: str, value, ns_main: str) -> None:
+    col, row_num = _cell_ref_to_col_row(cell_ref)
+    sheet_data = sheet_root.find(f"{{{ns_main}}}sheetData")
+    if sheet_data is None:
+        sheet_data = ET.SubElement(sheet_root, f"{{{ns_main}}}sheetData")
+
+    row_el = None
+    for r in sheet_data.findall(f"{{{ns_main}}}row"):
+        if int(r.attrib.get("r", "0")) == row_num:
+            row_el = r
+            break
+    if row_el is None:
+        row_el = ET.Element(f"{{{ns_main}}}row", {"r": str(row_num)})
+        inserted = False
+        for i, r in enumerate(list(sheet_data)):
+            if int(r.attrib.get("r", "0")) > row_num:
+                sheet_data.insert(i, row_el)
+                inserted = True
+                break
+        if not inserted:
+            sheet_data.append(row_el)
+
+    cell_el = None
+    for c in row_el.findall(f"{{{ns_main}}}c"):
+        if c.attrib.get("r") == cell_ref:
+            cell_el = c
+            break
+    if cell_el is None:
+        cell_el = ET.Element(f"{{{ns_main}}}c", {"r": cell_ref})
+        target_idx = _column_letters_to_index(col)
+        inserted = False
+        for i, c in enumerate(list(row_el)):
+            c_col, _ = _cell_ref_to_col_row(c.attrib.get("r", "A1"))
+            if _column_letters_to_index(c_col) > target_idx:
+                row_el.insert(i, cell_el)
+                inserted = True
+                break
+        if not inserted:
+            row_el.append(cell_el)
+
+    for child in list(cell_el):
+        if child.tag in {f"{{{ns_main}}}v", f"{{{ns_main}}}f", f"{{{ns_main}}}is"}:
+            cell_el.remove(child)
+
+    if value is None or value == "":
+        cell_el.attrib.pop("t", None)
+        return
+
+    if isinstance(value, str):
+        cell_el.attrib["t"] = "inlineStr"
+        is_el = ET.SubElement(cell_el, f"{{{ns_main}}}is")
+        t_el = ET.SubElement(is_el, f"{{{ns_main}}}t")
+        t_el.text = value
+    else:
+        cell_el.attrib.pop("t", None)
+        v_el = ET.SubElement(cell_el, f"{{{ns_main}}}v")
+        v_el.text = str(float(value)) if isinstance(value, float) else str(value)
+
+
+def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame, cliente_nome: str, data_calculo: date) -> bytes:
+    """Preenche o modelo Cálculo Inicial FUABC.xlsm com os títulos do cliente, preservando fórmulas/estrutura."""
+    if not template_bytes:
+        raise ValueError("Envie o modelo .xlsm de cálculo.")
+    tit = titulos_df.copy() if titulos_df is not None else pd.DataFrame()
+    if tit.empty:
+        raise ValueError("Não há títulos abertos para preencher no cálculo.")
+    if len(tit) > 570:
+        raise ValueError("O modelo suporta até 570 linhas de títulos nesta versão.")
+
+    tit["_venc_sort"] = tit.get("vencimento", pd.Series(dtype=str)).apply(lambda v: parse_iso_date(normalize_text(v)) or date.max)
+    tit["_valor_calc"] = tit.apply(_valor_notificacao, axis=1)
+    tit = tit.sort_values(["_venc_sort", "numero_titulo", "parcela"], kind="stable")
+
+    zin = zipfile.ZipFile(BytesIO(template_bytes), "r")
+    output = BytesIO()
+    ns_main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    ET.register_namespace('', ns_main)
+    ET.register_namespace('r', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships')
+
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                root = ET.fromstring(data)
+                _set_xlsx_cell_value(root, "D19", _excel_serial_from_date(data_calculo), ns_main)
+                _set_xlsx_cell_value(root, "D29", "AUTORA: FIRST MEDICAL SERVICE LTDA", ns_main)
+                _set_xlsx_cell_value(root, "D30", f"RÉU: {normalize_text(cliente_nome).upper()}", ns_main)
+                for row_num in range(40, 610):
+                    _set_xlsx_cell_value(root, f"B{row_num}", None, ns_main)
+                    _set_xlsx_cell_value(root, f"D{row_num}", None, ns_main)
+                for i, (_, row) in enumerate(tit.iterrows(), start=40):
+                    venc = row.get("_venc_sort")
+                    serial_venc = _excel_serial_from_date(venc) if venc != date.max else None
+                    _set_xlsx_cell_value(root, f"B{i}", serial_venc, ns_main)
+                    _set_xlsx_cell_value(root, f"D{i}", float(row.get("_valor_calc", 0) or 0), ns_main)
+                data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+            elif item.filename == "xl/workbook.xml":
+                root = ET.fromstring(data)
+                calc = root.find(f"{{{ns_main}}}calcPr")
+                if calc is None:
+                    calc = ET.SubElement(root, f"{{{ns_main}}}calcPr")
+                calc.attrib["calcMode"] = "auto"
+                calc.attrib["fullCalcOnLoad"] = "1"
+                calc.attrib["forceFullCalc"] = "1"
+                data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+            zout.writestr(item, data)
+    zin.close()
+    output.seek(0)
+    return output.getvalue()
+
+
+def safe_xlsm_name(cliente_nome: str, data_calculo: date) -> str:
+    return f"calculo_tjsp_{safe_filename(cliente_nome)}_{data_calculo.strftime('%Y%m%d')}.xlsm"
+
 # -----------------------------------------------------------------------------
 # App
 # -----------------------------------------------------------------------------
@@ -4467,7 +4684,7 @@ render_secure_save_notice()
 
 with st.sidebar:
     st.markdown("### Navegação")
-    NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Agenda", "Simulador", "Carteira", "Relatórios", "Histórico", "Régua", "Base de títulos", "Segurança"]
+    NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Agenda", "Simulador", "Cálculo TJSP", "Carteira", "Relatórios", "Histórico", "Régua", "Base de títulos", "Segurança"]
     if is_admin():
         NAV_OPTIONS.insert(-1, "Usuários")
     if "_pending_nav_page" in st.session_state:
@@ -4932,6 +5149,12 @@ elif page == "Cliente":
             notif_c6, notif_c7 = st.columns(2)
             notif_mensal = notif_c6.text_input("Contraprestação mensal", value="", placeholder="Opcional", key=f"notif_mensal_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
             notif_endereco = notif_c7.text_input("Cidade/UF do cliente", value="", placeholder="Ex.: São Paulo/SP", key=f"notif_endereco_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
+            notif_teams = st.text_input(
+                "Link da reunião no Teams (opcional)",
+                value="",
+                placeholder="Cole aqui o link da reunião para gerar um QR Code na carta",
+                key=f"notif_teams_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None,
+            )
             notif_sign = st.text_area(
                 "Assinatura",
                 value="Tiago Esteves da Cunha\nOAB/SP nº 266.999",
@@ -4950,6 +5173,7 @@ elif page == "Cliente":
                     contraprestacao_txt=notif_mensal,
                     prazo_txt=notif_prazo,
                     signatario_txt=notif_sign,
+                    teams_link=notif_teams,
                 )
                 st.download_button(
                     "Baixar notificação oficial em PDF",
@@ -5306,6 +5530,69 @@ elif page == "Simulador":
         s2.metric("Juros", br_money(juros_livre))
         s3.metric("Multa", br_money(multa_livre))
         s4.metric("Valor corrigido", br_money(total_livre))
+
+
+elif page == "Cálculo TJSP":
+    st.markdown("### Cálculo TJSP")
+    st.caption("Preencha automaticamente o modelo de cálculo com os títulos abertos do cliente selecionado.")
+
+    fila_calc = prepare_fila_clientes(data_ref)
+    if fila_calc.empty:
+        st.info("Não há clientes com títulos em aberto para gerar o cálculo.")
+    else:
+        c1, c2 = st.columns([2, 1])
+        labels_calc = fila_calc.apply(
+            lambda r: f"{r.get('nome_cliente','')} • {int(r.get('qtd_titulos',0) or 0)} título(s) • {br_money(r.get('saldo_total',0))}", axis=1
+        ).tolist()
+        idx_calc = c1.selectbox("Cliente", list(range(len(labels_calc))), format_func=lambda i: labels_calc[i], key="calculo_tjsp_cliente")
+        data_calc = c2.date_input("Atualizar parcelas até", value=data_ref, format="DD/MM/YYYY", key="calculo_tjsp_data")
+        selecionado_calc = fila_calc.iloc[int(idx_calc)]
+        tit_calc = load_titulos_cliente(
+            selecionado_calc["cliente_codigo"], selecionado_calc["loja"], selecionado_calc["nome_cliente"], somente_abertos=True
+        )
+
+        st.markdown("#### Títulos que irão para a planilha")
+        preview_cols = [c for c in ["numero_titulo", "parcela", "tipo", "vencimento", "saldo_atual", "valor_titulo"] if c in tit_calc.columns]
+        preview = tit_calc[preview_cols].copy()
+        if "vencimento" in preview.columns:
+            preview["vencimento"] = pd.to_datetime(preview["vencimento"], errors="coerce").dt.strftime("%d/%m/%Y")
+        for col_val in ["saldo_atual", "valor_titulo"]:
+            if col_val in preview.columns:
+                preview[col_val] = preview[col_val].apply(br_money)
+        st.dataframe(preview.rename(columns={
+            "numero_titulo": "Título", "parcela": "Parcela", "tipo": "Tipo", "vencimento": "Vencimento",
+            "saldo_atual": "Valor atual", "valor_titulo": "Valor original"
+        }), use_container_width=True, hide_index=True)
+
+        modelo_fixo_bytes, modelo_fixo_status = find_modelo_calculo_tjsp_bytes()
+        if modelo_fixo_bytes:
+            st.success(modelo_fixo_status)
+            st.caption("Modelo oficial localizado automaticamente. O CRM preserva as fórmulas e preenche apenas datas e valores dos títulos.")
+        else:
+            st.warning(modelo_fixo_status)
+            st.caption("Se preferir, envie o modelo manualmente abaixo enquanto o arquivo não estiver fixo no GitHub.")
+
+        modelo_xlsm = st.file_uploader("Substituir modelo manualmente (.xlsm) — opcional", type=["xlsm"], key="modelo_calculo_tjsp")
+        template_bytes = modelo_xlsm.read() if modelo_xlsm is not None else modelo_fixo_bytes
+
+        if template_bytes is not None:
+            try:
+                xlsm_bytes = preencher_calculo_tjsp_xlsm(
+                    template_bytes=template_bytes,
+                    titulos_df=tit_calc,
+                    cliente_nome=str(selecionado_calc.get("nome_cliente", "CLIENTE")),
+                    data_calculo=data_calc,
+                )
+                st.success("Planilha preenchida. Ao abrir no Excel, habilite o cálculo/edição para atualizar as fórmulas do modelo.")
+                st.download_button(
+                    "Baixar cálculo preenchido",
+                    data=xlsm_bytes,
+                    file_name=safe_xlsm_name(str(selecionado_calc.get("nome_cliente", "CLIENTE")), data_calc),
+                    mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                    use_container_width=True,
+                )
+            except Exception as exc:
+                st.error(f"Não consegui gerar a planilha: {exc}")
 
 elif page == "Carteira":
     st.markdown("### Carteira comercial")
