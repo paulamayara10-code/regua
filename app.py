@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v8.1 LTS"
+APP_VERSION = "v8.2 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -4636,6 +4636,63 @@ def _remove_calc_chain_references(xml_bytes: bytes, filename: str) -> bytes:
     return xml_bytes
 
 
+
+def _forcar_recalculo_excel_xlsm(xlsm_bytes: bytes) -> bytes:
+    """Ajusta metadados do .xlsm para o Excel recalcular as fórmulas ao abrir.
+
+    O openpyxl preserva fórmulas/macros, mas não calcula as fórmulas. Alguns
+    Excels mantêm o valor em cache do modelo original. Este pós-processamento
+    remove a cadeia antiga de cálculo e grava calcPr de forma explícita.
+    """
+    ns_main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    ns_rel = "http://schemas.openxmlformats.org/package/2006/relationships"
+    ns_ct = "http://schemas.openxmlformats.org/package/2006/content-types"
+    ET.register_namespace("", ns_main)
+    ET.register_namespace("", ns_rel)
+
+    src_zip = zipfile.ZipFile(BytesIO(xlsm_bytes), "r")
+    output = BytesIO()
+
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in src_zip.infolist():
+            if item.filename == "xl/calcChain.xml":
+                continue
+
+            data = src_zip.read(item.filename)
+
+            if item.filename == "xl/workbook.xml":
+                root = ET.fromstring(data)
+                calc = root.find(f"{{{ns_main}}}calcPr")
+                if calc is None:
+                    calc = ET.SubElement(root, f"{{{ns_main}}}calcPr")
+                calc.attrib["calcId"] = "0"
+                calc.attrib["calcMode"] = "auto"
+                calc.attrib["fullCalcOnLoad"] = "1"
+                calc.attrib["forceFullCalc"] = "1"
+                calc.attrib["calcOnSave"] = "1"
+                data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+            elif item.filename == "xl/_rels/workbook.xml.rels":
+                root = ET.fromstring(data)
+                for rel in list(root):
+                    if str(rel.attrib.get("Type", "")).endswith("/calcChain"):
+                        root.remove(rel)
+                data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+            elif item.filename == "[Content_Types].xml":
+                root = ET.fromstring(data)
+                for node in list(root):
+                    if node.attrib.get("PartName") == "/xl/calcChain.xml":
+                        root.remove(node)
+                data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+            zout.writestr(item, data)
+
+    src_zip.close()
+    output.seek(0)
+    return output.getvalue()
+
+
 def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame, cliente_nome: str, data_calculo: date) -> bytes:
     """Preenche o modelo Cálculo Inicial FUABC.xlsm preservando compatibilidade com Excel.
 
@@ -4699,6 +4756,8 @@ def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame,
         wb.calculation.fullCalcOnLoad = True
         wb.calculation.forceFullCalc = True
         wb.calculation.calcMode = "auto"
+        wb.calculation.calcOnSave = True
+        wb.calculation.calcId = 0
     except Exception:
         pass
 
@@ -4710,6 +4769,10 @@ def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame,
 
     output.seek(0)
     generated = output.getvalue()
+    try:
+        generated = _forcar_recalculo_excel_xlsm(generated)
+    except Exception:
+        pass
 
     # Validação final do pacote gerado. Isso não garante que o Excel vá recalcular,
     # mas garante que o arquivo entregue não está quebrado como ZIP/Office Open XML.
