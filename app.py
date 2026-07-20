@@ -26,6 +26,8 @@ import shutil
 import base64
 import json
 import os
+import subprocess
+import tempfile
 import hashlib
 import hmac
 import secrets as pysecrets
@@ -45,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v8.2 LTS"
+APP_VERSION = "v8.4 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -2528,6 +2530,39 @@ def _valor_notificacao(row: pd.Series) -> float:
         return 0.0
 
 
+def montar_endereco_completo_cliente(row) -> str:
+    """Monta endereço completo do cliente para uso na notificação."""
+    try:
+        endereco = normalize_text(row.get("endereco", "") or "").strip()
+        bairro = normalize_text(row.get("bairro", "") or "").strip()
+        municipio = normalize_text(row.get("municipio", "") or "").strip()
+        uf = normalize_text(row.get("uf", "") or "").strip()
+        cep = normalize_text(row.get("cep", "") or "").strip()
+    except Exception:
+        endereco = bairro = municipio = uf = cep = ""
+
+    partes = []
+    if endereco:
+        partes.append(endereco)
+    if bairro:
+        partes.append(f"Bairro: {bairro}")
+
+    cidade_uf = ""
+    if municipio and uf:
+        cidade_uf = f"{municipio}/{uf}"
+    elif municipio:
+        cidade_uf = municipio
+    elif uf:
+        cidade_uf = uf
+    if cidade_uf:
+        partes.append(cidade_uf)
+
+    if cep:
+        partes.append(f"CEP: {cep}")
+
+    return " - ".join(partes)
+
+
 def gerar_notificacao_extrajudicial_pdf(
     cliente_nome: str,
     razao_social: str,
@@ -4693,7 +4728,51 @@ def _forcar_recalculo_excel_xlsm(xlsm_bytes: bytes) -> bytes:
     return output.getvalue()
 
 
-def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame, cliente_nome: str, data_calculo: date) -> bytes:
+
+def _recalcular_xlsm_com_libreoffice(xlsm_bytes: bytes) -> Tuple[bytes, str]:
+    """Tenta recalcular o .xlsm em modo headless usando LibreOffice, quando disponível.
+
+    Isso resolve modelos em que o Excel mantém cache antigo de fórmulas. Em ambientes
+    sem LibreOffice, retorna o arquivo original e uma mensagem informativa.
+    """
+    soffice = shutil.which("libreoffice") or shutil.which("soffice")
+    if not soffice:
+        return xlsm_bytes, "LibreOffice não disponível no servidor; arquivo marcado para recalcular ao abrir no Excel."
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        src_path = tmpdir_path / "calculo_tjsp.xlsm"
+        src_path.write_bytes(xlsm_bytes)
+        profile_dir = tmpdir_path / "lo_profile"
+        profile_dir.mkdir(exist_ok=True)
+        cmd = [
+            soffice,
+            "--headless",
+            "--invisible",
+            "--nodefault",
+            "--nofirststartwizard",
+            "--nolockcheck",
+            f"-env:UserInstallation=file://{profile_dir.as_posix()}",
+            "--convert-to",
+            "xlsm",
+            "--outdir",
+            tmpdir_path.as_posix(),
+            src_path.as_posix(),
+        ]
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45)
+        except Exception as exc:
+            return xlsm_bytes, f"Não foi possível recalcular no servidor; arquivo marcado para recalcular ao abrir no Excel. Detalhe: {exc}"
+
+        candidates = sorted(tmpdir_path.glob("*.xlsm"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+        if candidates:
+            data = candidates[0].read_bytes()
+            if len(data) > 500:
+                return data, "Planilha recalculada no servidor antes do download."
+        return xlsm_bytes, "Recalculo no servidor não gerou novo arquivo; arquivo marcado para recalcular ao abrir no Excel."
+
+
+def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame, cliente_nome: str, data_calculo: date, razao_social: str = "") -> tuple[bytes, str]:
     """Preenche o modelo Cálculo Inicial FUABC.xlsm preservando compatibilidade com Excel.
 
     A geração por manipulação direta do XML funcionava para alguns modelos, mas
@@ -4737,9 +4816,10 @@ def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame,
     ws = wb.worksheets[0]
 
     # Campos principais do modelo.
+    reu_completo = normalize_text(razao_social or cliente_nome).upper()
     ws["D19"] = data_calculo
     ws["D29"] = "AUTORA: FIRST MEDICAL SERVICE LTDA"
-    ws["D30"] = f"RÉU: {normalize_text(cliente_nome).upper()}"
+    ws["D30"] = f"RÉU: {reu_completo}"
 
     # Limpa apenas os campos de entrada que o CRM preenche. Não mexe nas fórmulas.
     for row_num in range(40, 610):
@@ -4774,6 +4854,8 @@ def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame,
     except Exception:
         pass
 
+    generated, recalc_msg = _recalcular_xlsm_com_libreoffice(generated)
+
     # Validação final do pacote gerado. Isso não garante que o Excel vá recalcular,
     # mas garante que o arquivo entregue não está quebrado como ZIP/Office Open XML.
     try:
@@ -4787,7 +4869,7 @@ def preencher_calculo_tjsp_xlsm(template_bytes: bytes, titulos_df: pd.DataFrame,
     except zipfile.BadZipFile as exc:
         raise ValueError("O arquivo gerado não ficou em formato Excel válido.") from exc
 
-    return generated
+    return generated, recalc_msg
 
 def safe_xlsm_name(cliente_nome: str, data_calculo: date) -> str:
     return f"calculo_tjsp_{safe_filename(cliente_nome)}_{data_calculo.strftime('%Y%m%d')}.xlsm"
@@ -5274,8 +5356,9 @@ elif page == "Cliente":
             notif_contrato = notif_c4.text_input("Data/contrato de locação", value="", placeholder="Ex.: 01/01/2021", key=f"notif_contrato_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
             notif_prazo = notif_c5.text_input("Prazo", value="", placeholder="Ex.: 5 dias úteis", key=f"notif_prazo_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
             notif_c6, notif_c7 = st.columns(2)
+            _notif_endereco_padrao = montar_endereco_completo_cliente(selected)
             notif_mensal = notif_c6.text_input("Contraprestação mensal", value="", placeholder="Opcional", key=f"notif_mensal_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
-            notif_endereco = notif_c7.text_input("Cidade/UF do cliente", value="", placeholder="Ex.: São Paulo/SP", key=f"notif_endereco_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
+            notif_endereco = notif_c7.text_input("Endereço completo do cliente", value=_notif_endereco_padrao, placeholder="Endereço, bairro, cidade/UF e CEP", key=f"notif_endereco_{widget_cliente_key}" if 'widget_cliente_key' in locals() else None)
             notif_teams = st.text_input(
                 "Link da reunião no Teams (opcional)",
                 value="",
@@ -5674,6 +5757,8 @@ elif page == "Cálculo TJSP":
         idx_calc = c1.selectbox("Cliente", list(range(len(labels_calc))), format_func=lambda i: labels_calc[i], key="calculo_tjsp_cliente")
         data_calc = c2.date_input("Atualizar parcelas até", value=data_ref, format="DD/MM/YYYY", key="calculo_tjsp_data")
         selecionado_calc = fila_calc.iloc[int(idx_calc)]
+        reu_preview = str(selecionado_calc.get("razao_social", "") or selecionado_calc.get("nome_cliente", "CLIENTE"))
+        st.caption(f"Réu no cálculo: {reu_preview}")
         tit_calc = load_titulos_cliente(
             selecionado_calc["cliente_codigo"], selecionado_calc["loja"], selecionado_calc["nome_cliente"], somente_abertos=True
         )
@@ -5709,13 +5794,15 @@ elif page == "Cálculo TJSP":
                     st.warning(modelo_status)
                 else:
                     with st.spinner("Gerando planilha do cálculo..."):
-                        xlsm_bytes = preencher_calculo_tjsp_xlsm(
+                        reu_calculo = str(selecionado_calc.get("razao_social", "") or selecionado_calc.get("nome_cliente", "CLIENTE"))
+                        xlsm_bytes, recalc_msg = preencher_calculo_tjsp_xlsm(
                             template_bytes=template_bytes,
                             titulos_df=tit_calc,
                             cliente_nome=str(selecionado_calc.get("nome_cliente", "CLIENTE")),
                             data_calculo=data_calc,
+                            razao_social=reu_calculo,
                         )
-                    st.success(f"Planilha preenchida. {modelo_status}")
+                    st.success(f"Planilha preenchida. Réu: {reu_calculo}. {modelo_status} {recalc_msg}")
                     st.download_button(
                         "Baixar cálculo preenchido",
                         data=xlsm_bytes,
