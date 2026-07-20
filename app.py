@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v7.4 LTS"
+APP_VERSION = "v7.5 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -4350,6 +4350,8 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
             "email_nfe": email_nfe,
             "email_comercial": email_comercial,
             "email_financeiro": email_financeiro,
+            "notas_cliente": ", ".join(sorted(set([normalize_note_key(v) for v in grp.get("numero_titulo", pd.Series(dtype=str)).tolist() if normalize_note_key(v)]))),
+            "razoes_busca": " ".join([str(razao_social or ""), str(nome_fantasia or ""), str(nome_cliente or "")]),
             "valor_prioridade": float(grp["saldo_atual"].sum()) * (max_dias + 1),
         })
     out = pd.DataFrame(rows)
@@ -4364,6 +4366,8 @@ def apply_fila_filters(fila: pd.DataFrame, prefix: str = "fila") -> pd.DataFrame
         return fila
     filtered = fila.copy()
     cliente_search = str(st.session_state.get(f"{prefix}_cliente", "") or "").strip()
+    nf_search = normalize_note_key(st.session_state.get(f"{prefix}_nf", ""))
+    razao_search = str(st.session_state.get(f"{prefix}_razao", "") or "").strip()
     acao_filter = st.session_state.get(f"{prefix}_acao", "Todas")
     resp_filter = st.session_state.get(f"{prefix}_resp", "Todos")
     gerente_filter = st.session_state.get(f"{prefix}_gerente", "Todos")
@@ -4373,7 +4377,14 @@ def apply_fila_filters(fila: pd.DataFrame, prefix: str = "fila") -> pd.DataFrame
     cobrador_filter = st.session_state.get(f"{prefix}_cobrador", "Todos")
 
     if cliente_search:
-        filtered = filtered[filtered["nome_cliente"].str.contains(cliente_search, case=False, na=False)]
+        filtered = filtered[filtered["nome_cliente"].astype(str).str.contains(cliente_search, case=False, na=False)]
+    if nf_search and "notas_cliente" in filtered.columns:
+        filtered = filtered[filtered["notas_cliente"].astype(str).apply(lambda x: nf_search in {normalize_note_key(v) for v in re.split(r"[,;\s]+", x) if normalize_note_key(v)})]
+    if razao_search:
+        if "razoes_busca" in filtered.columns:
+            filtered = filtered[filtered["razoes_busca"].astype(str).str.contains(razao_search, case=False, na=False)]
+        elif "razao_social" in filtered.columns:
+            filtered = filtered[filtered["razao_social"].astype(str).str.contains(razao_search, case=False, na=False)]
     if acao_filter and acao_filter != "Todas":
         filtered = filtered[filtered["acao_do_dia"] == acao_filter]
     if resp_filter == "Sem vendedor ou gerente":
@@ -4733,10 +4744,14 @@ elif page == "Fila por cliente":
     if fila.empty:
         st.success("Não há clientes em cobrança.")
     else:
-        colf1, colf2, colf3 = st.columns([2, 1.2, 1.4])
+        colf1, colf2, colf3 = st.columns([2, 1.1, 2])
         colf1.text_input("Filtrar cliente", placeholder="Digite parte do nome do cliente", key="fila_cliente")
-        colf2.selectbox("Ação", ["Todas"] + sorted(fila["acao_do_dia"].dropna().unique().tolist()), key="fila_acao")
-        colf3.selectbox("Responsável", ["Todos", "Sem vendedor ou gerente", "Sem vendedor", "Sem gerente"], key="fila_resp")
+        colf2.text_input("NF", placeholder="Nº da nota", key="fila_nf")
+        colf3.text_input("Razão social", placeholder="Digite parte da razão social", key="fila_razao")
+
+        colf_acao, colf_resp = st.columns([1.2, 1.4])
+        colf_acao.selectbox("Ação", ["Todas"] + sorted(fila["acao_do_dia"].dropna().unique().tolist()), key="fila_acao")
+        colf_resp.selectbox("Responsável", ["Todos", "Sem vendedor ou gerente", "Sem vendedor", "Sem gerente"], key="fila_resp")
 
         colf4, colf5 = st.columns(2)
         gerentes = ["Todos"] + sorted(fila["gerente"].replace("", "Sem gerente").dropna().unique().tolist())
@@ -4773,6 +4788,8 @@ elif page == "Fila por cliente":
         if st.button("Abrir primeiro cliente desta fila", type="primary", use_container_width=True, disabled=filtered.empty):
             st.session_state["cliente_index"] = 0
             st.session_state["cliente_cliente"] = st.session_state.get("fila_cliente", "")
+            st.session_state["cliente_nf"] = st.session_state.get("fila_nf", "")
+            st.session_state["cliente_razao"] = st.session_state.get("fila_razao", "")
             st.session_state["cliente_acao"] = st.session_state.get("fila_acao", "Todas")
             st.session_state["cliente_resp"] = st.session_state.get("fila_resp", "Todos")
             st.session_state["cliente_gerente"] = st.session_state.get("fila_gerente", "Todos")
@@ -4800,10 +4817,13 @@ elif page == "Cliente":
     if fila_clientes.empty:
         st.warning("Não há clientes com títulos abertos. Faça o primeiro upload ou verifique a base.")
     else:
-        cfilter1, cfilter2, cfilter3 = st.columns([2, 1.2, 1.4])
+        cfilter1, cfilter2, cfilter3 = st.columns([2, 1.1, 2])
         cfilter1.text_input("Filtrar cliente", placeholder="Digite parte do nome", key="cliente_cliente")
-        cfilter2.selectbox("Ação", ["Todas"] + sorted(fila_clientes["acao_do_dia"].dropna().unique().tolist()), key="cliente_acao")
-        cfilter3.selectbox("Responsável", ["Todos", "Sem vendedor ou gerente", "Sem vendedor", "Sem gerente"], key="cliente_resp")
+        cfilter2.text_input("NF", placeholder="Nº da nota", key="cliente_nf")
+        cfilter3.text_input("Razão social", placeholder="Digite parte da razão social", key="cliente_razao")
+        cfilter_acao, cfilter_resp = st.columns([1.2, 1.4])
+        cfilter_acao.selectbox("Ação", ["Todas"] + sorted(fila_clientes["acao_do_dia"].dropna().unique().tolist()), key="cliente_acao")
+        cfilter_resp.selectbox("Responsável", ["Todos", "Sem vendedor ou gerente", "Sem vendedor", "Sem gerente"], key="cliente_resp")
         cfilter4, cfilter5 = st.columns(2)
         cfilter4.selectbox("Gerente", ["Todos"] + sorted(fila_clientes["gerente"].replace("", "Sem gerente").dropna().unique().tolist()), key="cliente_gerente")
         cfilter5.selectbox("Vendedor", ["Todos"] + sorted(fila_clientes["vendedor"].replace("", "Sem vendedor").dropna().unique().tolist()), key="cliente_vendedor")
@@ -5403,6 +5423,10 @@ elif page == "Relatórios":
         tipos_sel = f4.multiselect("Tipo de cliente", sorted(base["tipo_cliente"].dropna().unique().tolist()))
         cobradores_sel = f5.multiselect("Cobrador", sorted(base["cobrador"].dropna().unique().tolist()))
         acao_sel = f6.multiselect("Ação do dia", sorted(base["acao_do_dia"].dropna().unique().tolist()))
+        f7, f8, f9 = st.columns([1.1, 2, 1.5])
+        nf_rel = f7.text_input("Filtrar NF", placeholder="Nº da nota")
+        razao_rel = f8.text_input("Filtrar razão social", placeholder="Digite parte da razão social")
+        cliente_rel = f9.text_input("Filtrar nome do cliente", placeholder="Nome/fantasia")
         aging_sel = st.multiselect("Faixa de atraso", ["0-30", "31-60", "61-90", "91-180", "180+"])
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -5419,6 +5443,17 @@ elif page == "Relatórios":
             rel = rel[rel["cobrador"].isin(cobradores_sel)]
         if acao_sel:
             rel = rel[rel["acao_do_dia"].isin(acao_sel)]
+        nf_rel_key = normalize_note_key(nf_rel)
+        if nf_rel_key and "numero_titulo" in rel.columns:
+            rel = rel[rel["numero_titulo"].astype(str).apply(lambda v: normalize_note_key(v) == nf_rel_key or nf_rel_key in normalize_note_key(v))]
+        if razao_rel and "razao_social" in rel.columns:
+            rel = rel[rel["razao_social"].astype(str).str.contains(razao_rel.strip(), case=False, na=False)]
+        if cliente_rel:
+            busca_cliente_rel = cliente_rel.strip()
+            rel = rel[
+                rel["nome_cliente"].astype(str).str.contains(busca_cliente_rel, case=False, na=False)
+                | rel.get("nome_fantasia", pd.Series("", index=rel.index)).astype(str).str.contains(busca_cliente_rel, case=False, na=False)
+            ]
 
         def faixa_atraso(dias: int) -> str:
             try:
