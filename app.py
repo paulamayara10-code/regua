@@ -45,7 +45,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v7.0 LTS"
+APP_VERSION = "v7.1 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -2486,58 +2486,50 @@ def gerar_notificacao_extrajudicial_pdf(
 ) -> bytes:
     """Gera a notificação extrajudicial usando o PDF oficial como timbrado.
 
-    Mantém o timbrado e o texto-base aprovados, mas redesenha o corpo do documento
-    para evitar sobreposição de conteúdo. Quando necessário, o documento se expande
-    automaticamente para 2 ou mais páginas. Em vez de listar os títulos dentro do
-    parágrafo, inclui uma tabela-resumo com título/parcela, vencimento e valor.
+    Mantém o timbrado e o texto-base do modelo. Os títulos voltaram a sair em
+    texto corrido, como no documento original, e em sequência de vencimento.
+    O conteúdo é redesenhado sobre o timbrado com margem de segurança para não
+    cortar o logotipo do escritório.
     """
     try:
         from copy import deepcopy
         from reportlab.lib import colors
         from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT, TA_CENTER
         from reportlab.lib.styles import ParagraphStyle
-        from reportlab.lib.units import cm
-        from reportlab.platypus import (
-            SimpleDocTemplate,
-            Paragraph,
-            Spacer,
-            Table,
-            TableStyle,
-        )
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
         from pypdf import PdfReader, PdfWriter
     except Exception as exc:
         raise RuntimeError("Inclua reportlab>=4.0.0 e pypdf>=4.0.0 no requirements.txt.") from exc
 
     destinatario = normalize_text(razao_social or cliente_nome).strip() or normalize_text(cliente_nome or "CLIENTE")
     localidade = normalize_text(endereco_cliente).strip()
+    cnpj_txt = normalize_text(cnpj).strip()
     data_contrato_txt = normalize_text(data_contrato_txt).strip() or "____/____/________"
     contraprestacao_txt = normalize_text(contraprestacao_txt).strip() or "R$ __________"
     prazo_txt = normalize_text(prazo_txt).strip()
 
     titulos_df = titulos_cliente.copy() if titulos_cliente is not None else pd.DataFrame()
     if titulos_df.empty:
+        titulos_lista = "títulos em aberto"
+        vencimentos_lista = "datas constantes no demonstrativo de cobrança"
         valor_total = 0.0
-        tabela_resumo = [["Título / Parcela", "Vencimento", "Valor atualizado"], ["Sem títulos abertos", "-", br_money(0)]]
     else:
-        titulos_df["_label"] = titulos_df.apply(_titulo_label_for_notificacao, axis=1)
-        titulos_df["_valor_notif"] = titulos_df.apply(_valor_notificacao, axis=1)
         def _venc_date_for_sort(v):
             dt = parse_iso_date(normalize_text(v))
             return dt if dt else date.max
 
+        titulos_df["_label"] = titulos_df.apply(_titulo_label_for_notificacao, axis=1)
+        titulos_df["_valor_notif"] = titulos_df.apply(_valor_notificacao, axis=1)
         titulos_df["_venc_date_sort"] = titulos_df.get("vencimento", pd.Series(dtype=str)).apply(_venc_date_for_sort)
         titulos_df["_venc_fmt"] = titulos_df["_venc_date_sort"].apply(
-            lambda dt: dt.strftime("%d/%m/%Y") if dt and dt != date.max else "-"
+            lambda dt: dt.strftime("%d/%m/%Y") if dt and dt != date.max else "sem data informada"
         )
+        titulos_df = titulos_df.sort_values(by=["_venc_date_sort", "_label"], kind="stable")
         valor_total = float(titulos_df["_valor_notif"].sum())
-        tabela_resumo = [["Título / Parcela", "Vencimento", "Valor atualizado"]]
-        for _, row in titulos_df.sort_values(by=["_venc_date_sort", "_label"], kind="stable").iterrows():
-            tabela_resumo.append([
-                str(row.get("_label") or "-"),
-                str(row.get("_venc_fmt") or "-"),
-                br_money(row.get("_valor_notif", 0.0)),
-            ])
-        tabela_resumo.append(["TOTAL", "", br_money(valor_total)])
+
+        # Texto corrido no mesmo espírito do modelo: títulos em sequência e vencimentos na mesma ordem.
+        titulos_lista = ", ".join(titulos_df["_label"].astype(str).tolist()) or "títulos em aberto"
+        vencimentos_lista = ", ".join(titulos_df["_venc_fmt"].astype(str).tolist()) or "datas constantes no demonstrativo de cobrança"
 
     prazo_frase = f" no prazo de <b>{html.escape(prazo_txt)}</b>" if prazo_txt else ""
 
@@ -2553,8 +2545,8 @@ def gerar_notificacao_extrajudicial_pdf(
         pagesize=(width, height),
         leftMargin=70,
         rightMargin=70,
-        topMargin=70,
-        bottomMargin=115,
+        topMargin=150,
+        bottomMargin=125,
     )
 
     normal = ParagraphStyle(
@@ -2567,20 +2559,17 @@ def gerar_notificacao_extrajudicial_pdf(
         spaceAfter=0,
     )
     body = ParagraphStyle("NotifBody", parent=normal, firstLineIndent=112, leading=19)
-    body_no_indent = ParagraphStyle("NotifBodyNoIndent", parent=normal, firstLineIndent=0, leading=19)
+    body_no_indent = ParagraphStyle("NotifBodyNoIndent", parent=normal, firstLineIndent=0, leading=19, alignment=TA_LEFT)
     bold = ParagraphStyle("NotifBold", parent=normal, fontName="Times-Bold", fontSize=10.8, leading=16, alignment=TA_LEFT)
     ref = ParagraphStyle("NotifRef", parent=normal, fontName="Times-Bold", fontSize=12, leading=15, alignment=TA_LEFT)
     sign = ParagraphStyle("NotifSign", parent=normal, fontName="Times-Roman", fontSize=10.5, leading=15, alignment=TA_CENTER)
-    small = ParagraphStyle("NotifSmall", parent=normal, fontSize=10, leading=14, alignment=TA_LEFT)
 
     story = []
-    story.append(Spacer(1, 8))
     story.append(Paragraph("À", bold))
     story.append(Spacer(1, 4))
     story.append(Paragraph(html.escape(destinatario), bold))
-    cnpj_txt = normalize_text(cnpj).strip()
     if cnpj_txt:
-        story.append(Paragraph(f"CNPJ: {html.escape(cnpj_txt)}", small))
+        story.append(Paragraph(f"CNPJ: {html.escape(cnpj_txt)}", bold))
     if localidade:
         story.append(Paragraph(html.escape(localidade), bold))
     story.append(Spacer(1, 12))
@@ -2599,33 +2588,12 @@ def gerar_notificacao_extrajudicial_pdf(
 
     p2 = (
         "Ocorre que segundo informações da instituição bancária responsável pelo recebimento, consta o não "
-        "pagamento dos títulos relacionados no quadro-resumo abaixo, totalizando o valor de "
-        f"<b>{html.escape(br_money(valor_total))}</b>, conforme planilha de cálculos do Tribunal de Justiça do Estado de São Paulo em anexo."
+        f"pagamento dos títulos <b>{html.escape(titulos_lista)}</b> vencidos em "
+        f"<b>{html.escape(vencimentos_lista)}</b> totalizando o valor de "
+        f"<b>{html.escape(br_money(valor_total))}</b>."
     )
     story.append(Paragraph(p2, body))
     story.append(Spacer(1, 12))
-
-    table = Table(tabela_resumo, colWidths=[doc.width * 0.50, doc.width * 0.20, doc.width * 0.30], repeatRows=1)
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9E6F2")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
-        ("FONTNAME", (0, 0), (-1, 0), "Times-Bold"),
-        ("FONTSIZE", (0, 0), (-1, 0), 10),
-        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
-        ("TOPPADDING", (0, 0), (-1, 0), 6),
-        ("GRID", (0, 0), (-1, -1), 0.45, colors.HexColor("#6F7D8C")),
-        ("FONTNAME", (0, 1), (-1, -2), "Times-Roman"),
-        ("FONTSIZE", (0, 1), (-1, -1), 10),
-        ("LEADING", (0, 1), (-1, -1), 12),
-        ("ALIGN", (1, 1), (1, -1), "CENTER"),
-        ("ALIGN", (2, 1), (2, -1), "RIGHT"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F7F7F7")]),
-        ("FONTNAME", (0, -1), (-1, -1), "Times-Bold"),
-        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#EEF3F8")),
-    ]))
-    story.append(table)
-    story.append(Spacer(1, 16))
 
     p3 = (
         f"Assim, com o objetivo de constituir a <b>{html.escape(destinatario)}</b> em mora por inadimplência "
@@ -2654,8 +2622,10 @@ def gerar_notificacao_extrajudicial_pdf(
 
     def draw_background(canv, _doc):
         canv.saveState()
+        # Limpa somente a área do texto do modelo. A margem superior foi preservada
+        # para não cortar o logotipo/cabeçalho do escritório.
         canv.setFillColor(colors.white)
-        canv.rect(48, 82, width - 96, 678, stroke=0, fill=1)
+        canv.rect(48, 90, width - 96, 640, stroke=0, fill=1)
         canv.restoreState()
 
     doc.build(story, onFirstPage=draw_background, onLaterPages=draw_background)
