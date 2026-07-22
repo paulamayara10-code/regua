@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v9.8 LTS"
+APP_VERSION = "v9.9 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -3651,6 +3651,31 @@ def make_cliente_id(cliente_codigo: str, loja: str, nome_cliente: str) -> str:
     return f"{codigo}|{loja_fmt}|{nome}"
 
 
+def cnpj_digits(value) -> str:
+    """Retorna apenas dígitos do CNPJ/CPF para associação segura."""
+    return re.sub(r"\D+", "", str(value or ""))
+
+
+def cliente_cobranca_key(row) -> str:
+    """Chave operacional de cobrança.
+
+    Prioridade:
+    1) CNPJ/CPF quando disponível, para unir o mesmo cliente mesmo com código/loja diferente;
+    2) código + loja + nome, quando não há documento;
+    3) nome normalizado, apenas como último recurso.
+    """
+    doc = cnpj_digits(row.get("cnpj", ""))
+    if len(doc) >= 11:
+        return f"DOC:{doc}"
+    codigo = format_identifier(row.get("cliente_codigo", ""), 6)
+    loja = format_identifier(row.get("loja", ""), 2)
+    nome = upper_text(normalize_text(row.get("nome_cliente", "")))
+    if codigo.strip("0") or loja.strip("0"):
+        return f"COD:{codigo}|{loja}|{nome}"
+    razao = upper_text(normalize_text(row.get("razao_social", "") or row.get("nome_fantasia", "") or nome))
+    return f"NOME:{normalize_col_key(razao)}"
+
+
 def get_notificacao_memoria_cliente(cliente_codigo: str, loja: str, nome_cliente: str) -> Dict[str, str]:
     """Carrega informações recorrentes da notificação para o cliente."""
     cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
@@ -4257,6 +4282,13 @@ def save_cliente_all(
         )
 
         where, params = _cliente_where_clause(cliente_codigo, loja, nome_cliente)
+        doc_save = cnpj_digits(cnpj)
+        if len(doc_save) >= 11:
+            # Atualiza todos os títulos do mesmo documento para evitar cobranças separadas
+            # por ausência de código/loja ou variação cadastral.
+            where = "REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(cnpj, ''), '.', ''), '/', ''), '-', ''), ' ', '') = ?"
+            params = [doc_save]
+
         cur = conn.execute(
             f"""
             UPDATE titulos
@@ -4509,9 +4541,19 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
     conn.close()
 
     rows = []
-    group_cols = ["cliente_codigo", "loja", "nome_cliente"]
-    for keys, grp in fila.groupby(group_cols, dropna=False):
-        cliente_codigo, loja, nome_cliente = keys
+    fila = fila.copy()
+    fila["_cliente_cobranca_key"] = fila.apply(cliente_cobranca_key, axis=1)
+    for key_cobranca, grp in fila.groupby("_cliente_cobranca_key", dropna=False):
+        # Usa o registro mais completo/recente como representante visual do grupo.
+        grp_rep = grp.copy()
+        grp_rep["_complete_score"] = grp_rep.apply(
+            lambda r: sum(bool(normalize_text(r.get(c, ""))) for c in ["cnpj", "razao_social", "nome_fantasia", "vendedor", "gerente"]),
+            axis=1,
+        )
+        rep = grp_rep.sort_values("_complete_score", ascending=False).iloc[0]
+        cliente_codigo = str(rep.get("cliente_codigo", ""))
+        loja = str(rep.get("loja", ""))
+        nome_cliente = str(rep.get("nome_cliente", ""))
         max_ciclo = int(grp["ciclo_cobranca"].max())
         max_dias = int(grp["dias_atraso"].max())
         min_venc = grp["vencimento"].min()
@@ -4525,6 +4567,13 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
 
         cid = make_cliente_id(cliente_codigo, loja, nome_cliente)
         cad = cad_map.get(cid, {})
+        if not cad:
+            doc_grp = cnpj_digits(_join_unique(grp.get("cnpj", pd.Series(dtype=str)), limite=1))
+            if len(doc_grp) >= 11:
+                for _cad in cad_map.values():
+                    if cnpj_digits(_cad.get("cnpj", "")) == doc_grp:
+                        cad = _cad
+                        break
         tipo_cliente = str(cad.get("tipo_cliente", "") or "Não especial")
         cobrador = str(cad.get("cobrador", "") or "")
         razao_social = str(cad.get("razao_social", "") or _join_unique(grp.get("razao_social", pd.Series(dtype=str)), limite=1) or "")
@@ -4548,7 +4597,7 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
         notif_assinatura = str(cad.get("notif_assinatura", "") or "")
         acao = get_action_for_day(max_ciclo, str(grp["status"].iloc[0]), promessa_cliente, ref)
         rows.append({
-            "cliente_id": f"{cliente_codigo}|{loja}|{nome_cliente}",
+            "cliente_id": str(key_cobranca),
             "cliente_codigo": cliente_codigo,
             "loja": loja,
             "nome_cliente": nome_cliente,
@@ -4586,6 +4635,8 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
             "notif_teams_link": notif_teams_link,
             "notif_assinatura": notif_assinatura,
             "notas_cliente": ", ".join(sorted(set([normalize_note_key(v) for v in grp.get("numero_titulo", pd.Series(dtype=str)).tolist() if normalize_note_key(v)]))),
+            "variacoes_cadastro": int(grp[["cliente_codigo", "loja", "nome_cliente"]].drop_duplicates().shape[0]),
+            "chave_cobranca": str(key_cobranca),
             "razoes_busca": " ".join([str(razao_social or ""), str(nome_fantasia or ""), str(nome_cliente or "")]),
             "valor_prioridade": float(grp["saldo_atual"].sum()) * (max_dias + 1),
         })
@@ -4686,6 +4737,25 @@ def advance_cliente_index(total_options: int) -> None:
 def load_titulos_cliente(cliente_codigo: str, loja: str, nome_cliente: str, somente_abertos: bool = True) -> pd.DataFrame:
     conn = get_conn()
     where, params = _cliente_where_clause(cliente_codigo, loja, nome_cliente)
+
+    # Se o cliente possui CNPJ/CPF identificado, a cobrança deve considerar todos os
+    # títulos do mesmo documento, mesmo que algum relatório tenha vindo sem código,
+    # com loja diferente ou com pequena variação de nome.
+    doc = ""
+    try:
+        doc_row = conn.execute(
+            f"SELECT cnpj FROM titulos WHERE {where} AND COALESCE(cnpj, '') != '' LIMIT 1",
+            params,
+        ).fetchone()
+        if doc_row:
+            doc = cnpj_digits(doc_row["cnpj"])
+    except Exception:
+        doc = ""
+
+    if len(doc) >= 11:
+        where = "REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(cnpj, ''), '.', ''), '/', ''), '-', ''), ' ', '') = ?"
+        params = [doc]
+
     query = f"SELECT * FROM titulos WHERE {where}"
     if somente_abertos:
         query += " AND status != ?"
@@ -5695,7 +5765,7 @@ elif page == "Cliente":
             metric_card("Maior atraso", f"{maior_atraso_resumo} dia(s)", "No filtro")
 
         with st.expander("Ver clientes encontrados no filtro", expanded=False):
-            resumo_cols = [c for c in ["nome_cliente", "razao_social", "cnpj", "qtd_titulos", "saldo_total", "maior_dias_atraso", "vendedor", "gerente", "notas_cliente"] if c in options.columns]
+            resumo_cols = [c for c in ["nome_cliente", "razao_social", "cnpj", "qtd_titulos", "saldo_total", "maior_dias_atraso", "variacoes_cadastro", "vendedor", "gerente", "notas_cliente"] if c in options.columns]
             resumo_clientes = options[resumo_cols].copy()
             if "saldo_total" in resumo_clientes.columns:
                 resumo_clientes["saldo_total"] = resumo_clientes["saldo_total"].apply(br_money)
@@ -5707,6 +5777,7 @@ elif page == "Cliente":
                     "qtd_titulos": "Títulos",
                     "saldo_total": "Saldo",
                     "maior_dias_atraso": "Maior atraso",
+                    "variacoes_cadastro": "Variações agrupadas",
                     "vendedor": "Vendedor",
                     "gerente": "Gerente",
                     "notas_cliente": "Notas",
