@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v9.0 LTS"
+APP_VERSION = "v9.1 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -5733,7 +5733,6 @@ elif page == "Cliente":
 
                 # Mantém a usuária exatamente na tela Cliente após salvar observação/ação.
                 # Antes o rerun podia voltar para outra aba/tela dependendo do estado do menu.
-                st.session_state["nav_page"] = "Cliente"
                 st.session_state["cliente_index"] = selected_pos
                 st.session_state["cliente_save_success"] = " ".join(mensagens) + " Cliente mantido na tela."
                 st.rerun()
