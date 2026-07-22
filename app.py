@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v8.9 LTS"
+APP_VERSION = "v9.0 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -5416,6 +5416,9 @@ elif page == "Fila por cliente":
 
 elif page == "Cliente":
     st.markdown("### Cliente")
+    _cliente_msg = st.session_state.pop("cliente_save_success", "")
+    if _cliente_msg:
+        st.success(_cliente_msg)
     fila_clientes = prepare_fila_clientes(data_ref)
     if fila_clientes.empty:
         st.warning("Não há clientes com títulos abertos. Faça o primeiro upload ou verifique a base.")
@@ -5728,8 +5731,11 @@ elif page == "Cliente":
                 elif resultado.get("agenda") == "incluída":
                     mensagens.append(f"Retorno agendado para {retorno.strftime('%d/%m/%Y')}.")
 
-                st.success(" ".join(mensagens) + " Cliente mantido na tela.")
+                # Mantém a usuária exatamente na tela Cliente após salvar observação/ação.
+                # Antes o rerun podia voltar para outra aba/tela dependendo do estado do menu.
+                st.session_state["nav_page"] = "Cliente"
                 st.session_state["cliente_index"] = selected_pos
+                st.session_state["cliente_save_success"] = " ".join(mensagens) + " Cliente mantido na tela."
                 st.rerun()
 
         st.markdown("#### Histórico do cliente")
