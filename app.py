@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v9.4 LTS"
+APP_VERSION = "v9.5 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -5073,24 +5073,24 @@ with st.sidebar:
     NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Consulta", "Cliente", "Agenda", "Simulador", "Cálculo TJSP", "Carteira", "Relatórios", "Histórico", "Régua", "Base de títulos", "Segurança"]
     if is_admin():
         NAV_OPTIONS.insert(-1, "Usuários")
+    # Usa uma chave nova para o controle interno de navegação.
+    # Isso evita conflito com sessões antigas em que "nav_page" era a chave do widget.
     if "_pending_nav_page" in st.session_state:
         pending_page = st.session_state.pop("_pending_nav_page")
         if pending_page in NAV_OPTIONS:
-            st.session_state["nav_page"] = pending_page
-    if "nav_page" not in st.session_state or st.session_state["nav_page"] not in NAV_OPTIONS:
-        st.session_state["nav_page"] = "Dashboard"
+            st.session_state["_nav_current_page"] = pending_page
+    if "_nav_current_page" not in st.session_state or st.session_state["_nav_current_page"] not in NAV_OPTIONS:
+        st.session_state["_nav_current_page"] = "Dashboard"
 
-    # Usa uma chave separada para o widget do menu. Assim o app pode controlar a
-    # navegação sem tentar alterar diretamente a chave de um widget já criado pelo Streamlit.
-    nav_index = NAV_OPTIONS.index(st.session_state.get("nav_page", "Dashboard"))
+    nav_index = NAV_OPTIONS.index(st.session_state.get("_nav_current_page", "Dashboard"))
     page = st.radio(
         "Selecione",
         NAV_OPTIONS,
         index=nav_index,
-        key="_nav_page_widget",
+        key="_nav_page_widget_v95",
         label_visibility="collapsed",
     )
-    st.session_state["nav_page"] = page
+    st.session_state["_nav_current_page"] = page
     data_ref = st.date_input("Data de referência", value=date.today(), format="DD/MM/YYYY")
     usuario_logado = current_user()
     st.markdown(
