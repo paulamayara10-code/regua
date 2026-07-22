@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v9.2 LTS"
+APP_VERSION = "v9.3 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -5145,7 +5145,8 @@ if page == "Upload diário":
                 r3.metric("Títulos atualizados", resultado_bi.get("titulos_atualizados", 0))
                 r4.metric("Clientes atualizados", resultado_bi.get("clientes_atualizados", 0))
                 if resultado_bi.get("sem_match"):
-                    with st.expander("Ver títulos sem correspondência", expanded=False):
+                    st.warning(f"{len(resultado_bi.get('sem_match', []))} título(s) sem correspondência na BASE BI.")
+                    if st.checkbox("Mostrar títulos sem correspondência", key="show_sem_match_base_bi"):
                         st.write(resultado_bi.get("sem_match"))
             else:
                 st.error(resultado_bi.get("mensagem", "Não foi possível aplicar a BASE BI."))
@@ -5165,7 +5166,8 @@ if page == "Upload diário":
                 q3.metric("Títulos atualizados", resultado_cad.get("titulos_atualizados", 0))
                 q4.metric("Clientes atualizados", resultado_cad.get("clientes_atualizados", 0))
                 if resultado_cad.get("sem_match"):
-                    with st.expander("Ver títulos sem correspondência cadastral", expanded=False):
+                    st.warning(f"{len(resultado_cad.get('sem_match', []))} título(s) sem correspondência cadastral.")
+                    if st.checkbox("Mostrar títulos sem correspondência cadastral", key="show_sem_match_rel_vendedor"):
                         st.write(resultado_cad.get("sem_match"))
             else:
                 st.error(resultado_cad.get("mensagem", "Não foi possível aplicar o relatório por vendedor."))
@@ -5185,7 +5187,8 @@ if page == "Upload diário":
                 c3.metric("Títulos atualizados", resultado_cli.get("titulos_atualizados", 0))
                 c4.metric("Clientes atualizados", resultado_cli.get("clientes_atualizados", 0))
                 if resultado_cli.get("sem_match"):
-                    with st.expander("Ver clientes sem correspondência no cadastro", expanded=False):
+                    st.warning(f"{len(resultado_cli.get('sem_match', []))} cliente(s) sem correspondência no cadastro.")
+                    if st.checkbox("Mostrar clientes sem correspondência no cadastro", key="show_sem_match_cadastro_clientes"):
                         st.write(resultado_cli.get("sem_match"))
             else:
                 st.error(resultado_cli.get("mensagem", "Não foi possível aplicar o cadastro de clientes."))
