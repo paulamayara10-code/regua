@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v9.1 LTS"
+APP_VERSION = "v9.2 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -5070,7 +5070,7 @@ render_secure_save_notice()
 
 with st.sidebar:
     st.markdown("### Navegação")
-    NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Agenda", "Simulador", "Cálculo TJSP", "Carteira", "Relatórios", "Histórico", "Régua", "Base de títulos", "Segurança"]
+    NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Consulta", "Cliente", "Agenda", "Simulador", "Cálculo TJSP", "Carteira", "Relatórios", "Histórico", "Régua", "Base de títulos", "Segurança"]
     if is_admin():
         NAV_OPTIONS.insert(-1, "Usuários")
     if "_pending_nav_page" in st.session_state:
@@ -5413,6 +5413,167 @@ elif page == "Fila por cliente":
             hide_index=True,
         )
         st.caption("Use a aba 'Cliente único' para registrar uma única ação para todos os títulos abertos do cliente.")
+
+
+elif page == "Consulta":
+    st.markdown("### Consulta geral")
+    st.caption("Resumo pesquisável da carteira: consulte por cliente, CNPJ, nota, razão social, vendedor ou gerente.")
+
+    tit_consulta = load_titulos()
+    if tit_consulta.empty:
+        st.warning("Ainda não há títulos carregados para consulta.")
+    else:
+        dfc = tit_consulta.copy()
+
+        # Normalizações auxiliares para filtros.
+        for col in ["nome_cliente", "razao_social", "nome_fantasia", "cnpj", "numero_titulo", "vendedor", "gerente", "segmento", "status"]:
+            if col not in dfc.columns:
+                dfc[col] = ""
+        dfc["_cnpj_digits"] = dfc["cnpj"].astype(str).str.replace(r"\D+", "", regex=True)
+        dfc["_nota_key"] = dfc["numero_titulo"].astype(str).apply(normalize_note_key)
+        dfc["_busca_geral"] = (
+            dfc["nome_cliente"].astype(str) + " " +
+            dfc["razao_social"].astype(str) + " " +
+            dfc["nome_fantasia"].astype(str) + " " +
+            dfc["cnpj"].astype(str) + " " +
+            dfc["_cnpj_digits"].astype(str) + " " +
+            dfc["numero_titulo"].astype(str) + " " +
+            dfc["_nota_key"].astype(str) + " " +
+            dfc["vendedor"].astype(str) + " " +
+            dfc["gerente"].astype(str) + " " +
+            dfc["segmento"].astype(str)
+        ).str.upper()
+
+        st.markdown("#### Filtros rápidos")
+        q1, q2, q3 = st.columns([2.2, 1.1, 1.1])
+        busca_geral = q1.text_input("Busca geral", placeholder="Nome, razão, CNPJ, NF, vendedor ou gerente", key="consulta_busca_geral")
+        status_op = q2.selectbox("Status", ["Em cobrança", "Todos", "Pago"], key="consulta_status")
+        segmento_opcoes = ["Todos"] + sorted([x for x in dfc["segmento"].replace("", "Sem segmento").dropna().unique().tolist()])
+        segmento_op = q3.selectbox("Segmento", segmento_opcoes, key="consulta_segmento")
+
+        f1, f2, f3 = st.columns(3)
+        filtro_nome = f1.text_input("Nome / fantasia", key="consulta_nome")
+        filtro_razao = f2.text_input("Razão social", key="consulta_razao")
+        filtro_cnpj = f3.text_input("CNPJ", key="consulta_cnpj")
+
+        f4, f5, f6 = st.columns(3)
+        filtro_nf = f4.text_input("Nota / título", key="consulta_nf")
+        filtro_vendedor = f5.text_input("Vendedor", key="consulta_vendedor")
+        filtro_gerente = f6.text_input("Gerente", key="consulta_gerente")
+
+        filtrado = dfc.copy()
+        if status_op != "Todos":
+            filtrado = filtrado[filtrado["status"].astype(str).str.upper() == status_op.upper()]
+        if segmento_op != "Todos":
+            if segmento_op == "Sem segmento":
+                filtrado = filtrado[filtrado["segmento"].astype(str).str.strip() == ""]
+            else:
+                filtrado = filtrado[filtrado["segmento"].astype(str).str.upper() == segmento_op.upper()]
+
+        if busca_geral:
+            termos = [t for t in normalize_text(busca_geral).upper().split() if t]
+            for termo in termos:
+                termo_nota = normalize_note_key(termo)
+                termo_digits = re.sub(r"\D+", "", termo)
+                filtrado = filtrado[
+                    filtrado["_busca_geral"].str.contains(re.escape(termo), na=False)
+                    | (filtrado["_nota_key"].astype(str).str.contains(re.escape(termo_nota), na=False) if termo_nota else False)
+                    | (filtrado["_cnpj_digits"].astype(str).str.contains(re.escape(termo_digits), na=False) if termo_digits else False)
+                ]
+
+        if filtro_nome:
+            termo = normalize_text(filtro_nome).upper()
+            filtrado = filtrado[
+                filtrado["nome_cliente"].astype(str).str.upper().str.contains(re.escape(termo), na=False)
+                | filtrado["nome_fantasia"].astype(str).str.upper().str.contains(re.escape(termo), na=False)
+            ]
+        if filtro_razao:
+            termo = normalize_text(filtro_razao).upper()
+            filtrado = filtrado[filtrado["razao_social"].astype(str).str.upper().str.contains(re.escape(termo), na=False)]
+        if filtro_cnpj:
+            termo_digits = re.sub(r"\D+", "", str(filtro_cnpj))
+            filtrado = filtrado[filtrado["_cnpj_digits"].astype(str).str.contains(re.escape(termo_digits), na=False)] if termo_digits else filtrado
+        if filtro_nf:
+            termo_nf = normalize_note_key(filtro_nf)
+            filtrado = filtrado[filtrado["_nota_key"].astype(str).str.contains(re.escape(termo_nf), na=False)] if termo_nf else filtrado
+        if filtro_vendedor:
+            termo = normalize_text(filtro_vendedor).upper()
+            filtrado = filtrado[filtrado["vendedor"].astype(str).str.upper().str.contains(re.escape(termo), na=False)]
+        if filtro_gerente:
+            termo = normalize_text(filtro_gerente).upper()
+            filtrado = filtrado[filtrado["gerente"].astype(str).str.upper().str.contains(re.escape(termo), na=False)]
+
+        st.markdown("#### Resumo da consulta")
+        total_clientes = int(filtrado["cliente_id"].nunique()) if "cliente_id" in filtrado.columns else int(filtrado[["cliente_codigo","loja","nome_cliente"]].drop_duplicates().shape[0])
+        total_titulos = int(filtrado["titulo_id"].nunique()) if "titulo_id" in filtrado.columns else len(filtrado)
+        valor_total = float(filtrado.get("saldo_atual", pd.Series(dtype=float)).sum()) if not filtrado.empty else 0.0
+        maior_atraso = int(pd.to_numeric(filtrado.get("dias_atraso", pd.Series(dtype=float)), errors="coerce").max() or 0) if not filtrado.empty else 0
+        k1, k2, k3, k4 = st.columns(4)
+        metric_card("Clientes", total_clientes, "Encontrados")
+        with k2:
+            metric_card("Títulos", total_titulos, "No filtro")
+        with k3:
+            metric_card("Saldo", br_money(valor_total), "Valor em aberto/consultado")
+        with k4:
+            metric_card("Maior atraso", f"{maior_atraso} dia(s)", "Entre os títulos filtrados")
+
+        if filtrado.empty:
+            st.info("Nenhum resultado encontrado com os filtros selecionados.")
+        else:
+            st.markdown("#### Clientes encontrados")
+            group_cols = ["cliente_codigo", "loja", "nome_cliente"]
+            resumo = filtrado.groupby(group_cols, dropna=False).agg(
+                Razao_Social=("razao_social", lambda s: _join_unique(s, limite=1)),
+                Nome_Fantasia=("nome_fantasia", lambda s: _join_unique(s, limite=1)),
+                CNPJ=("cnpj", lambda s: _join_unique(s, limite=1)),
+                Vendedor=("vendedor", lambda s: _single_or_multiple(s, "vendedor")),
+                Gerente=("gerente", lambda s: _single_or_multiple(s, "gerente")),
+                Segmento=("segmento", lambda s: _single_or_multiple(s, "segmento")),
+                Titulos=("titulo_id", "nunique"),
+                Saldo=("saldo_atual", "sum"),
+                Maior_Atraso=("dias_atraso", "max"),
+                Notas=("numero_titulo", lambda s: ", ".join(sorted(set([normalize_text(x) for x in s if normalize_text(x)])))[:350]),
+            ).reset_index()
+            resumo["Código-Lj"] = resumo["cliente_codigo"].astype(str).apply(lambda x: format_identifier(x, 6)) + "-" + resumo["loja"].astype(str).apply(lambda x: format_identifier(x, 2))
+            resumo_show = resumo[[
+                "Código-Lj", "nome_cliente", "Razao_Social", "Nome_Fantasia", "CNPJ",
+                "Vendedor", "Gerente", "Segmento", "Titulos", "Saldo", "Maior_Atraso", "Notas"
+            ]].copy()
+            resumo_show["Saldo"] = resumo_show["Saldo"].apply(br_money)
+            st.dataframe(
+                resumo_show.rename(columns={
+                    "nome_cliente": "Cliente",
+                    "Razao_Social": "Razão social",
+                    "Nome_Fantasia": "Fantasia",
+                    "Maior_Atraso": "Maior atraso",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.markdown("#### Títulos encontrados")
+            detalhe_cols = [c for c in [
+                "numero_titulo", "parcela", "tipo", "nome_cliente", "razao_social", "cnpj",
+                "vendedor", "gerente", "segmento", "dt_emissao", "vencimento", "saldo_atual",
+                "dias_atraso", "status"
+            ] if c in filtrado.columns]
+            detalhe = filtrado[detalhe_cols].copy()
+            for cdata in ["dt_emissao", "vencimento"]:
+                if cdata in detalhe.columns:
+                    detalhe[cdata] = pd.to_datetime(detalhe[cdata], errors="coerce").dt.strftime("%d/%m/%Y")
+            if "saldo_atual" in detalhe.columns:
+                detalhe["saldo_atual"] = detalhe["saldo_atual"].apply(br_money)
+            st.dataframe(
+                detalhe.rename(columns={
+                    "numero_titulo": "NF/Título", "parcela": "Parcela", "tipo": "Tipo",
+                    "nome_cliente": "Cliente", "razao_social": "Razão social", "cnpj": "CNPJ",
+                    "vendedor": "Vendedor", "gerente": "Gerente", "segmento": "Segmento",
+                    "dt_emissao": "Emissão", "vencimento": "Vencimento", "saldo_atual": "Valor",
+                    "dias_atraso": "Dias atraso", "status": "Status"
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 elif page == "Cliente":
     st.markdown("### Cliente")
