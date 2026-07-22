@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v9.7 LTS"
+APP_VERSION = "v9.8 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -5322,7 +5322,10 @@ elif page == "Dashboard":
         st.warning("Ainda não existe histórico. Faça o primeiro upload diário para iniciar o CRM.")
     else:
         total_aberto = float(open_titles["saldo_atual"].sum()) if not open_titles.empty else 0
-        clientes_abertos = int(open_titles["cliente_codigo"].nunique()) if not open_titles.empty else 0
+        # Conta clientes pela mesma chave canônica usada na aba Cliente:
+        # código + loja + nome. Antes o Dashboard contava só cliente_codigo,
+        # por isso ficava menor quando o mesmo código tinha lojas/nomes distintos.
+        clientes_abertos = int(fila["cliente_id"].nunique()) if not fila.empty else 0
         acoes_hoje = int(len(fila[~fila["acao_do_dia"].eq("Aguardar promessa")])) if not fila.empty else 0
         promessas = int(len(fila[fila["acao_do_dia"].eq("Aguardar promessa")])) if not fila.empty else 0
         recebidos = float(paid_titles.loc[paid_titles["data_baixa"] == data_ref.isoformat(), "saldo_original"].sum()) if not paid_titles.empty else 0
