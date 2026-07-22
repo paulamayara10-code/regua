@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v9.5 LTS"
+APP_VERSION = "v9.7 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -3807,42 +3807,67 @@ def upsert_cliente_cadastro(
         ),
     )
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> List[str]:
+    try:
+        return [str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    except Exception:
+        return []
+
+
 def get_cliente_cadastro_map(conn: sqlite3.Connection) -> Dict[str, Dict[str, str]]:
-    """Retorna cadastro usando chave canônica, inclusive para registros antigos."""
-    df = pd.read_sql_query(
-        """
-        SELECT cliente_id, cliente_codigo, loja, nome_cliente, vendedor, gerente, observacao,
-               tipo_cliente, cobrador, razao_social, cnpj, contato, nome_fantasia,
-               telefone_financeiro, telefone_comercial, endereco, bairro, municipio, uf, cep,
-               email_nfe, email_comercial, email_financeiro,
-               notif_data_contrato, notif_contraprestacao, notif_prazo, notif_teams_link, notif_assinatura
-          FROM clientes
-        """,
-        conn,
-    )
+    """Retorna cadastro usando chave canônica, com leitura segura para bancos antigos."""
+    base_cols = [
+        "cliente_id", "cliente_codigo", "loja", "nome_cliente", "vendedor", "gerente", "observacao",
+        "tipo_cliente", "cobrador", "razao_social", "cnpj", "contato", "nome_fantasia",
+        "telefone_financeiro", "telefone_comercial", "endereco", "bairro", "municipio", "uf", "cep",
+        "email_nfe", "email_comercial", "email_financeiro",
+        "notif_data_contrato", "notif_contraprestacao", "notif_prazo", "notif_teams_link", "notif_assinatura",
+    ]
+
+    existing_cols = set(_table_columns(conn, "clientes"))
+    if not existing_cols:
+        return {}
+
+    selected_cols = [c for c in base_cols if c in existing_cols]
+    if not selected_cols:
+        return {}
+
+    try:
+        df = pd.read_sql_query(
+            f"SELECT {', '.join(selected_cols)} FROM clientes",
+            conn,
+        )
+    except Exception:
+        # Banco legado com alguma coluna pendente de migração: evita derrubar a tela Cliente.
+        fallback_cols = [c for c in ["cliente_id", "cliente_codigo", "loja", "nome_cliente", "vendedor", "gerente", "observacao"] if c in existing_cols]
+        if not fallback_cols:
+            return {}
+        df = pd.read_sql_query(f"SELECT {', '.join(fallback_cols)} FROM clientes", conn)
+
+    for c in base_cols:
+        if c not in df.columns:
+            df[c] = ""
+
     if df.empty:
         return {}
+
     result: Dict[str, Dict[str, str]] = {}
+    score_cols = [
+        "vendedor", "gerente", "observacao", "tipo_cliente", "cobrador",
+        "razao_social", "cnpj", "contato", "nome_fantasia",
+        "telefone_financeiro", "telefone_comercial", "endereco", "bairro", "municipio", "uf", "cep",
+        "email_nfe", "email_comercial", "email_financeiro",
+        "notif_data_contrato", "notif_contraprestacao", "notif_prazo", "notif_teams_link", "notif_assinatura",
+    ]
     for _, row in df.iterrows():
         key = make_cliente_id(row.get("cliente_codigo", ""), row.get("loja", ""), row.get("nome_cliente", ""))
         data = row.to_dict()
-        # Em caso de cadastros antigos duplicados, preserva o registro mais completo.
         current = result.get(key)
         if current is None:
             result[key] = data
             continue
-        current_score = sum(bool(normalize_text(current.get(c, ""))) for c in [
-            "vendedor", "gerente", "observacao", "tipo_cliente", "cobrador",
-            "razao_social", "cnpj", "contato", "nome_fantasia",
-            "telefone_financeiro", "telefone_comercial", "endereco", "bairro", "municipio", "uf", "cep",
-            "email_nfe", "email_comercial", "email_financeiro"
-        ])
-        new_score = sum(bool(normalize_text(data.get(c, ""))) for c in [
-            "vendedor", "gerente", "observacao", "tipo_cliente", "cobrador",
-            "razao_social", "cnpj", "contato", "nome_fantasia",
-            "telefone_financeiro", "telefone_comercial", "endereco", "bairro", "municipio", "uf", "cep",
-            "email_nfe", "email_comercial", "email_financeiro"
-        ])
+        current_score = sum(bool(normalize_text(current.get(c, ""))) for c in score_cols)
+        new_score = sum(bool(normalize_text(data.get(c, ""))) for c in score_cols)
         if new_score >= current_score:
             result[key] = data
     return result
@@ -4575,9 +4600,11 @@ def apply_fila_filters(fila: pd.DataFrame, prefix: str = "fila") -> pd.DataFrame
     if fila.empty:
         return fila
     filtered = fila.copy()
+    geral_search = str(st.session_state.get(f"{prefix}_geral", "") or "").strip()
     cliente_search = str(st.session_state.get(f"{prefix}_cliente", "") or "").strip()
     nf_search = normalize_note_key(st.session_state.get(f"{prefix}_nf", ""))
     razao_search = str(st.session_state.get(f"{prefix}_razao", "") or "").strip()
+    cnpj_search = re.sub(r"\D+", "", str(st.session_state.get(f"{prefix}_cnpj", "") or ""))
     acao_filter = st.session_state.get(f"{prefix}_acao", "Todas")
     resp_filter = st.session_state.get(f"{prefix}_resp", "Todos")
     gerente_filter = st.session_state.get(f"{prefix}_gerente", "Todos")
@@ -4586,10 +4613,34 @@ def apply_fila_filters(fila: pd.DataFrame, prefix: str = "fila") -> pd.DataFrame
     tipo_cliente_filter = st.session_state.get(f"{prefix}_tipo_cliente", "Todos")
     cobrador_filter = st.session_state.get(f"{prefix}_cobrador", "Todos")
 
+    if geral_search:
+        geral = normalize_text(geral_search).upper()
+        geral_digits = re.sub(r"\D+", "", geral_search)
+        geral_nf = normalize_note_key(geral_search)
+        busca_cols = []
+        for col in ["nome_cliente", "razao_social", "nome_fantasia", "cnpj", "notas_cliente", "vendedor", "gerente", "segmento", "cobrador"]:
+            if col in filtered.columns:
+                busca_cols.append(filtered[col].fillna("").astype(str))
+        if busca_cols:
+            busca_serie = busca_cols[0]
+            for serie in busca_cols[1:]:
+                busca_serie = busca_serie + " " + serie
+            busca_serie = busca_serie.astype(str).str.upper()
+            mask_geral = busca_serie.str.contains(re.escape(geral), na=False)
+            if geral_digits and "cnpj" in filtered.columns:
+                mask_geral = mask_geral | filtered["cnpj"].astype(str).str.replace(r"\D+", "", regex=True).str.contains(re.escape(geral_digits), na=False)
+            if geral_nf and "notas_cliente" in filtered.columns:
+                mask_geral = mask_geral | filtered["notas_cliente"].astype(str).apply(lambda x: geral_nf in {normalize_note_key(v) for v in re.split(r"[,;\s]+", x) if normalize_note_key(v)})
+            filtered = filtered[mask_geral]
     if cliente_search:
-        filtered = filtered[filtered["nome_cliente"].astype(str).str.contains(cliente_search, case=False, na=False)]
+        nome_mask = filtered["nome_cliente"].astype(str).str.contains(cliente_search, case=False, na=False)
+        if "nome_fantasia" in filtered.columns:
+            nome_mask = nome_mask | filtered["nome_fantasia"].astype(str).str.contains(cliente_search, case=False, na=False)
+        filtered = filtered[nome_mask]
     if nf_search and "notas_cliente" in filtered.columns:
         filtered = filtered[filtered["notas_cliente"].astype(str).apply(lambda x: nf_search in {normalize_note_key(v) for v in re.split(r"[,;\s]+", x) if normalize_note_key(v)})]
+    if cnpj_search and "cnpj" in filtered.columns:
+        filtered = filtered[filtered["cnpj"].astype(str).str.replace(r"\D+", "", regex=True).str.contains(re.escape(cnpj_search), na=False)]
     if razao_search:
         if "razoes_busca" in filtered.columns:
             filtered = filtered[filtered["razoes_busca"].astype(str).str.contains(razao_search, case=False, na=False)]
@@ -5070,7 +5121,7 @@ render_secure_save_notice()
 
 with st.sidebar:
     st.markdown("### Navegação")
-    NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Consulta", "Cliente", "Agenda", "Simulador", "Cálculo TJSP", "Carteira", "Relatórios", "Histórico", "Régua", "Base de títulos", "Segurança"]
+    NAV_OPTIONS = ["Dashboard", "Upload diário", "Fila por cliente", "Cliente", "Agenda", "Simulador", "Cálculo TJSP", "Carteira", "Relatórios", "Histórico", "Régua", "Base de títulos", "Segurança"]
     if is_admin():
         NAV_OPTIONS.insert(-1, "Usuários")
     # Usa uma chave nova para o controle interno de navegação.
@@ -5399,9 +5450,11 @@ elif page == "Fila por cliente":
 
         if st.button("Abrir primeiro cliente desta fila", type="primary", use_container_width=True, disabled=filtered.empty):
             st.session_state["cliente_index"] = 0
+            st.session_state["cliente_geral"] = st.session_state.get("fila_geral", "")
             st.session_state["cliente_cliente"] = st.session_state.get("fila_cliente", "")
             st.session_state["cliente_nf"] = st.session_state.get("fila_nf", "")
             st.session_state["cliente_razao"] = st.session_state.get("fila_razao", "")
+            st.session_state["cliente_cnpj"] = st.session_state.get("fila_cnpj", "")
             st.session_state["cliente_acao"] = st.session_state.get("fila_acao", "Todas")
             st.session_state["cliente_resp"] = st.session_state.get("fila_resp", "Todos")
             st.session_state["cliente_gerente"] = st.session_state.get("fila_gerente", "Todos")
@@ -5593,16 +5646,27 @@ elif page == "Cliente":
     if fila_clientes.empty:
         st.warning("Não há clientes com títulos abertos. Faça o primeiro upload ou verifique a base.")
     else:
+        st.markdown("#### Filtros e resumo")
+        cgeral1, cgeral2 = st.columns([2.4, 1])
+        cgeral1.text_input(
+            "Busca geral",
+            placeholder="Nome, CNPJ, nota, razão social, vendedor ou gerente",
+            key="cliente_geral",
+        )
+        cgeral2.text_input("CNPJ", placeholder="Digite com ou sem pontuação", key="cliente_cnpj")
+
         cfilter1, cfilter2, cfilter3 = st.columns([2, 1.1, 2])
-        cfilter1.text_input("Filtrar cliente", placeholder="Digite parte do nome", key="cliente_cliente")
-        cfilter2.text_input("NF", placeholder="Nº da nota", key="cliente_nf")
+        cfilter1.text_input("Nome / fantasia", placeholder="Digite parte do nome", key="cliente_cliente")
+        cfilter2.text_input("NF / título", placeholder="Nº da nota", key="cliente_nf")
         cfilter3.text_input("Razão social", placeholder="Digite parte da razão social", key="cliente_razao")
+
+        cfilter4, cfilter5 = st.columns(2)
+        cfilter4.selectbox("Vendedor", ["Todos"] + sorted(fila_clientes["vendedor"].replace("", "Sem vendedor").dropna().unique().tolist()), key="cliente_vendedor")
+        cfilter5.selectbox("Gerente", ["Todos"] + sorted(fila_clientes["gerente"].replace("", "Sem gerente").dropna().unique().tolist()), key="cliente_gerente")
+
         cfilter_acao, cfilter_resp = st.columns([1.2, 1.4])
         cfilter_acao.selectbox("Ação", ["Todas"] + sorted(fila_clientes["acao_do_dia"].dropna().unique().tolist()), key="cliente_acao")
         cfilter_resp.selectbox("Responsável", ["Todos", "Sem vendedor ou gerente", "Sem vendedor", "Sem gerente"], key="cliente_resp")
-        cfilter4, cfilter5 = st.columns(2)
-        cfilter4.selectbox("Gerente", ["Todos"] + sorted(fila_clientes["gerente"].replace("", "Sem gerente").dropna().unique().tolist()), key="cliente_gerente")
-        cfilter5.selectbox("Vendedor", ["Todos"] + sorted(fila_clientes["vendedor"].replace("", "Sem vendedor").dropna().unique().tolist()), key="cliente_vendedor")
         cfilter6, cfilter7, cfilter8 = st.columns(3)
         cfilter6.selectbox("Segmento", ["Todos"] + sorted(fila_clientes["segmento"].replace("", "Sem segmento").dropna().unique().tolist()), key="cliente_segmento")
         cfilter7.selectbox("Tipo de cliente", ["Todos", "Especial", "Não especial"], key="cliente_tipo_cliente")
@@ -5615,6 +5679,38 @@ elif page == "Cliente":
         if options.empty:
             st.warning("Nenhum cliente encontrado com os filtros atuais.")
             st.stop()
+
+        resumo_c1, resumo_c2, resumo_c3, resumo_c4 = st.columns(4)
+        with resumo_c1:
+            metric_card("Clientes", int(options["cliente_id"].nunique()), "No filtro")
+        with resumo_c2:
+            metric_card("Títulos", int(pd.to_numeric(options.get("qtd_titulos", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()), "Em aberto")
+        with resumo_c3:
+            metric_card("Saldo", br_money(float(pd.to_numeric(options.get("saldo_total", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())), "Total filtrado")
+        with resumo_c4:
+            maior_atraso_resumo = int(pd.to_numeric(options.get("maior_dias_atraso", pd.Series(dtype=float)), errors="coerce").max() or 0)
+            metric_card("Maior atraso", f"{maior_atraso_resumo} dia(s)", "No filtro")
+
+        with st.expander("Ver clientes encontrados no filtro", expanded=False):
+            resumo_cols = [c for c in ["nome_cliente", "razao_social", "cnpj", "qtd_titulos", "saldo_total", "maior_dias_atraso", "vendedor", "gerente", "notas_cliente"] if c in options.columns]
+            resumo_clientes = options[resumo_cols].copy()
+            if "saldo_total" in resumo_clientes.columns:
+                resumo_clientes["saldo_total"] = resumo_clientes["saldo_total"].apply(br_money)
+            st.dataframe(
+                resumo_clientes.rename(columns={
+                    "nome_cliente": "Cliente",
+                    "razao_social": "Razão social",
+                    "cnpj": "CNPJ",
+                    "qtd_titulos": "Títulos",
+                    "saldo_total": "Saldo",
+                    "maior_dias_atraso": "Maior atraso",
+                    "vendedor": "Vendedor",
+                    "gerente": "Gerente",
+                    "notas_cliente": "Notas",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         total_options = len(options)
         if "cliente_index" not in st.session_state:
