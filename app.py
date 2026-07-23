@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v10.0 LTS"
+APP_VERSION = "v10.2 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -125,7 +125,7 @@ st.markdown(
             --first-red: #D92D20;
         }
         .main, [data-testid="stAppViewContainer"] {background: radial-gradient(circle at top left, #eef7ff 0, #f7f9fc 35%, #f4f7fb 100%);}
-        .block-container {padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1480px;}
+        .block-container {padding-top: .75rem; padding-bottom: 1.4rem; max-width: 1540px;}
         [data-testid="stSidebar"] {background: linear-gradient(180deg, #0B2341 0%, #123E67 100%);}
         [data-testid="stSidebar"] * {color: #FFFFFF !important;}
         [data-testid="stSidebar"] div[data-testid="stRadio"] label {font-weight: 700;}
@@ -133,18 +133,18 @@ st.markdown(
         .first-header {
             background:
               linear-gradient(135deg, rgba(11,35,65,.98) 0%, rgba(18,103,168,.96) 62%, rgba(58,166,255,.92) 100%);
-            color: white; padding: 26px 30px; border-radius: 26px; margin-bottom: 20px;
+            color: white; padding: 18px 24px; border-radius: 22px; margin-bottom: 12px;
             box-shadow: 0 18px 45px rgba(15,39,66,0.20); position: relative; overflow: hidden;
         }
         .first-header:after {content:""; position:absolute; right:-70px; top:-90px; width:260px; height:260px; border-radius:50%; background:rgba(255,255,255,.12);}        
-        .first-header h1 {margin: 0; font-size: 34px; font-weight: 900; letter-spacing: -.03em; color: #FFFFFF !important;}
+        .first-header h1 {margin: 0; font-size: 29px; font-weight: 900; letter-spacing: -.03em; color: #FFFFFF !important;}
         .first-header h1 * {color: #FFFFFF !important;}
         .first-header p {margin: 7px 0 0 0; opacity: .94; font-weight: 600;}
         .first-chip {display:inline-flex; align-items:center; gap:8px; background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.22); border-radius: 999px; padding: 7px 12px; margin-top: 14px; font-size: 13px; font-weight: 750;}
-        .section-title {font-size: 20px; font-weight: 850; color: #0B2341; margin: 18px 0 10px 0; letter-spacing: -.01em;}
+        .section-title {font-size: 18px; font-weight: 850; color: #0B2341; margin: 12px 0 7px 0; letter-spacing: -.01em;}
         .metric-card {
-            background: rgba(255,255,255,.94); border-radius: 22px; padding: 18px 19px; border: 1px solid var(--first-border);
-            box-shadow: 0 10px 28px rgba(15,39,66,0.075); min-height: 112px;
+            background: rgba(255,255,255,.94); border-radius: 18px; padding: 13px 15px; border: 1px solid var(--first-border);
+            box-shadow: 0 8px 20px rgba(15,39,66,0.065); min-height: 92px;
             width: 100%; overflow: visible; box-sizing: border-box; border-left: 5px solid #1267A8;
         }
         .metric-card:hover {transform: translateY(-1px); transition: .15s ease; box-shadow: 0 14px 36px rgba(15,39,66,0.10);}        
@@ -168,7 +168,7 @@ st.markdown(
         .first-alert-warn {background:#FFFAEB; border:1px solid #FEDF89; color:#B54708; border-radius:16px; padding:12px 14px; font-weight:700;}
         .first-alert-danger {background:#FEF3F2; border:1px solid #FECDCA; color:#B42318; border-radius:16px; padding:12px 14px; font-weight:700;}
         div[data-testid="stDataFrame"] {background:white; border-radius: 18px; overflow: hidden;}
-        .stButton button, .stDownloadButton button {border-radius: 14px !important; font-weight: 800 !important; min-height: 42px;}
+        .stButton button, .stDownloadButton button {border-radius: 12px !important; font-weight: 800 !important; min-height: 36px;}
         .stTabs [data-baseweb="tab-list"] {gap: 8px;}
         .stTabs [data-baseweb="tab"] {border-radius: 999px; background: #FFFFFF; border: 1px solid var(--first-border); padding: 8px 16px;}
         .stTabs [aria-selected="true"] {background: #EAF5FF !important; color: #0B2341 !important; font-weight: 850;}
@@ -179,9 +179,9 @@ st.markdown(
         [data-testid="stSidebar"] [data-baseweb="input"] * {color: #0B2341 !important;}
         [data-testid="stSidebar"] label, [data-testid="stSidebar"] p {color: #FFFFFF !important;}
         .sidebar-spacer {height: 22px;}
-        .metric-card {min-height: 150px !important; display:flex; flex-direction:column; justify-content:flex-start;}
+        .metric-card {min-height: 104px !important; display:flex; flex-direction:column; justify-content:flex-start;}
         .metric-value {font-size: clamp(18px, 1.65vw, 28px) !important; word-break: keep-all !important;}
-        .metric-help {min-height: 32px;}
+        .metric-help {min-height: 18px;}
 
         .action-suggestion {background:#EAF5FF; border:1px solid #B8DAFF; border-left:5px solid #1267A8; border-radius:16px; padding:12px 16px; margin: 10px 0 16px 0; color:#0B2341; font-weight:800;}
         .notif-box {background:#FFFFFF; border:1px solid #DCE7F3; border-radius:18px; padding:16px; box-shadow:0 8px 20px rgba(15,39,66,.06); margin:12px 0;}
@@ -206,7 +206,14 @@ st.markdown(
         .user-sidebar-card {background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.22); border-radius:16px; padding:12px 14px; margin-top:14px;}
         .user-sidebar-card strong {font-size:14px;}
         .user-sidebar-card span {font-size:12px; opacity:.86;}
-    </style>
+            div[data-testid="stVerticalBlock"] {gap: .55rem !important;}
+        div[data-testid="stHorizontalBlock"] {gap: .75rem !important;}
+        .stTextInput, .stSelectbox, .stDateInput, .stNumberInput {margin-bottom: .15rem !important;}
+        label[data-testid="stWidgetLabel"] {margin-bottom: .15rem !important;}
+        [data-baseweb="input"], [data-baseweb="select"] {min-height: 36px !important;}
+        [data-baseweb="input"] input {padding-top: 6px !important; padding-bottom: 6px !important;}
+        .stExpander {margin-top: .25rem !important;}
+        </style>
     """,
     unsafe_allow_html=True,
 )
@@ -1218,6 +1225,13 @@ def render_auth_gate() -> None:
           [data-testid="stForm"] input {background: #FFFFFF !important; color: #0B2341 !important;}
           [data-testid="stForm"] [data-baseweb="select"] > div {background: #FFFFFF !important; color: #0B2341 !important;}
           [data-testid="stFormSubmitButton"] button {background: #58B3FF !important; color: #0B2341 !important; border: none !important;}
+                div[data-testid="stVerticalBlock"] {gap: .55rem !important;}
+        div[data-testid="stHorizontalBlock"] {gap: .75rem !important;}
+        .stTextInput, .stSelectbox, .stDateInput, .stNumberInput {margin-bottom: .15rem !important;}
+        label[data-testid="stWidgetLabel"] {margin-bottom: .15rem !important;}
+        [data-baseweb="input"], [data-baseweb="select"] {min-height: 36px !important;}
+        [data-baseweb="input"] input {padding-top: 6px !important; padding-bottom: 6px !important;}
+        .stExpander {margin-top: .25rem !important;}
         </style>
         <div class="login-shell">
           <div class="login-card">
@@ -1584,6 +1598,85 @@ def find_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
             if key and (key in col_key or col_key in key):
                 return col
     return None
+
+
+
+def _has_col(df: pd.DataFrame, candidates: list[str]) -> bool:
+    return find_col(df, candidates) is not None
+
+
+def normalize_faturamento_base_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Adapta formatos de relatório de faturamento/Protheus para o layout interno.
+
+    Suporta o relatório RFATEQP01 / Relação de Pedido X Faturamento:
+    - Numero -> Nota Fiscal/Pedido
+    - Nome -> Vendedor/Representante, quando existir Vendedor 1
+    - Nome Espec. -> Gerente/Especialista, como fallback
+    - Valor Bruto/Vlr.Total -> valor de peso para consolidação
+    """
+    out_df = df.copy()
+    out_df.columns = [str(c).strip() for c in out_df.columns]
+
+    numero_col = find_col(out_df, ["Nota Fiscal", "NF", "No. Titulo", "Título", "Titulo", "Numero", "Número", "Nro Pedido", "Pedido"])
+    if numero_col and not _has_col(out_df, ["Nota Fiscal", "NF", "No. Titulo", "Título", "Titulo"]):
+        out_df["Nota Fiscal"] = out_df[numero_col]
+
+    vendedor_nome_col = find_col(out_df, ["Nome Vendedor", "Nome do Vendedor", "VENDEDOR / REPRESENTANTE", "Vendedor", "Representante"])
+    vendedor_codigo_col = find_col(out_df, ["Vendedor 1", "Cod Vendedor", "Código Vendedor", "Cod. Vendedor"])
+    nome_generico_col = find_col(out_df, ["Nome"])
+    if vendedor_codigo_col and nome_generico_col and not vendedor_nome_col:
+        out_df["VENDEDOR / REPRESENTANTE"] = out_df[nome_generico_col]
+
+    gerente_col = find_col(out_df, ["GERENTE", "Gerente", "Gerente Comercial", "Supervisor", "Coordenador"])
+    espec_col = find_col(out_df, ["Nome Espec.", "Nome Espec", "Especialista", "Nome Especialista"])
+    if espec_col and not gerente_col:
+        out_df["GERENTE"] = out_df[espec_col]
+
+    valor_col = find_col(out_df, ["VALOR BRUTO", "Valor Bruto", "Vlr.Total", "Valor Total", "Vlr Total"])
+    if valor_col and not _has_col(out_df, ["VALOR BRUTO", "Valor Bruto"]):
+        out_df["VALOR BRUTO"] = out_df[valor_col]
+
+    return out_df
+
+
+def read_faturamento_excel_any(file_or_bytes) -> pd.DataFrame:
+    """Lê a base de faturamento procurando automaticamente a aba útil.
+
+    No RFATEQP01 a primeira aba é Parametros, então precisamos escolher a aba que
+    contém os dados de faturamento.
+    """
+    file_bytes = file_or_bytes.read() if hasattr(file_or_bytes, "read") else bytes(file_or_bytes)
+    try:
+        xls = pd.ExcelFile(BytesIO(file_bytes))
+        best_df = None
+        best_score = -1
+        for sheet_name in xls.sheet_names:
+            try:
+                candidate = pd.read_excel(xls, sheet_name=sheet_name)
+            except Exception:
+                continue
+            candidate = candidate.dropna(how="all")
+            if candidate.empty:
+                continue
+            candidate.columns = [str(c).strip() for c in candidate.columns]
+            norm = normalize_faturamento_base_columns(candidate)
+            score = 0
+            if _has_col(norm, ["Nota Fiscal", "NF", "No. Titulo", "Numero", "Pedido"]): score += 3
+            if _has_col(norm, ["Cliente", "Cod Cliente", "Código Cliente"]): score += 2
+            if _has_col(norm, ["Nome Cliente", "NOME DO CLIENTE", "Cliente Nome"]): score += 2
+            if _has_col(norm, ["VENDEDOR / REPRESENTANTE", "Nome Vendedor", "Vendedor"]): score += 2
+            if _has_col(norm, ["Segmento"]): score += 1
+            if _has_col(norm, ["VALOR BRUTO", "Valor Bruto", "Vlr.Total", "Valor Total"]): score += 1
+            score += min(len(norm), 100000) / 100000.0
+            if score > best_score:
+                best_score = score
+                best_df = norm
+        if best_df is not None and best_score >= 6:
+            return best_df
+    except Exception:
+        pass
+
+    return normalize_faturamento_base_columns(read_excel_any(file_bytes))
 
 
 def _digits(value) -> str:
@@ -2107,11 +2200,15 @@ def build_faturamento_maps(df_base: pd.DataFrame) -> tuple[dict, dict, dict, dic
     if df_base.empty:
         return {}, {}, {}, {}
 
+    df_base = normalize_faturamento_base_columns(df_base)
+    layout_rfateqp = False
+
     col_nota = find_col(df_base, [
         "Nota Fiscal", "NF", "N.F.", "Nº NF", "No NF", "Número NF", "Numero NF",
-        "Nota", "Documento", "No. Titulo", "Nº Título", "Titulo", "Título"
+        "Nota", "Documento", "No. Titulo", "Nº Título", "Titulo", "Título",
+        "Numero", "Número", "Pedido", "Nro Pedido", "Nº Pedido"
     ])
-    col_cliente = find_col(df_base, ["CLIENTE", "Cliente", "Cod Cliente", "Código Cliente", "Cod. Cliente", "A1_COD", "Codigo"])
+    col_cliente = find_col(df_base, ["CLIENTE", "Cliente", "Cod Cliente", "Código Cliente", "Cod. Cliente", "A1_COD", "Codigo", "Código"])
     col_loja = find_col(df_base, ["Loja", "A1_LOJA"])
     col_nome = find_col(df_base, ["NOME DO CLIENTE", "Nome Cliente", "Cliente Nome", "Nome", "Nome Fantasia", "A1_NOME"])
     col_razao = find_col(df_base, ["Razão Social", "Razao Social", "NOME DO CLIENTE", "Nome Cliente", "A1_NREDUZ"])
@@ -2265,7 +2362,7 @@ def load_faturamento_maps_from_github() -> tuple[tuple[dict, dict, dict, dict], 
     df_base = read_excel_any(data)
     maps = build_faturamento_maps(df_base)
     notas = len(maps[0]) if maps else 0
-    return maps, f"{origem} • {len(df_base)} linha(s) • {notas} nota(s) mapeada(s)"
+    return maps, f"{origem} • BASE BI anterior • {len(df_base)} linha(s) • {notas} nota(s) mapeada(s)"
 
 
 def parse_legacy_prf_numero(value) -> tuple[str, str, str]:
