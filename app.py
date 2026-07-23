@@ -133,9 +133,14 @@ st.markdown(
         }
 
         .block-container {
-            padding-top: .85rem;
-            padding-bottom: 1.8rem;
-            max-width: 1500px;
+            padding-top: .55rem;
+            padding-bottom: 1.4rem;
+            padding-left: 2.1rem;
+            padding-right: 2.1rem;
+            max-width: 1680px;
+        }
+        @media (min-width: 1720px) {
+            .block-container { max-width: 92vw; }
         }
 
         /* Sidebar */
@@ -156,14 +161,21 @@ st.markdown(
             background: rgba(255,255,255,.08);
             color: #fff;
         }
+        section[data-testid="stSidebar"] {
+            width: 252px !important;
+            min-width: 252px !important;
+        }
+        section[data-testid="stSidebar"] > div {
+            width: 252px !important;
+        }
 
         /* Header */
         .first-header {
             background: linear-gradient(135deg, rgba(11,35,65,.98) 0%, rgba(18,103,168,.96) 66%, rgba(58,166,255,.88) 100%);
             color: white;
-            padding: 18px 24px;
-            border-radius: 20px;
-            margin-bottom: 14px;
+            padding: 12px 22px;
+            border-radius: 16px;
+            margin-bottom: 10px;
             box-shadow: 0 10px 28px rgba(15,39,66,0.16);
             position: relative;
             overflow: hidden;
@@ -180,7 +192,7 @@ st.markdown(
         }
         .first-header h1 {
             margin: 0;
-            font-size: 29px;
+            font-size: 22px;
             font-weight: 900;
             letter-spacing: -.03em;
             color: #FFFFFF !important;
@@ -198,18 +210,18 @@ st.markdown(
             background: rgba(255,255,255,.14);
             border: 1px solid rgba(255,255,255,.22);
             border-radius: 999px;
-            padding: 6px 11px;
-            margin-top: 10px;
-            font-size: 12.5px;
+            padding: 5px 10px;
+            margin-top: 6px;
+            font-size: 12px;
             font-weight: 750;
         }
 
         /* Titles and spacing */
         .section-title {
-            font-size: 18px;
+            font-size: 17px;
             font-weight: 850;
             color: #0B2341;
-            margin: 14px 0 8px 0;
+            margin: 10px 0 6px 0;
             letter-spacing: -.01em;
         }
         h1, h2, h3, h4 {
@@ -217,24 +229,24 @@ st.markdown(
             letter-spacing: -.015em;
         }
         h3 {
-            margin-top: .6rem !important;
-            margin-bottom: .55rem !important;
+            margin-top: .45rem !important;
+            margin-bottom: .4rem !important;
         }
         h4 {
-            margin-top: .45rem !important;
-            margin-bottom: .35rem !important;
+            margin-top: .35rem !important;
+            margin-bottom: .28rem !important;
         }
-        div[data-testid="stVerticalBlock"] {gap: .58rem !important;}
-        div[data-testid="stHorizontalBlock"] {gap: .85rem !important;}
+        div[data-testid="stVerticalBlock"] {gap: .45rem !important;}
+        div[data-testid="stHorizontalBlock"] {gap: .65rem !important;}
 
         /* Cards revisados: mais leves, menores e alinhados */
         .metric-card {
             background: var(--first-card);
             border: 1px solid var(--first-border-soft);
             border-top: 4px solid var(--first-blue);
-            border-radius: 16px;
-            padding: 13px 15px 12px 15px;
-            min-height: 104px !important;
+            border-radius: 14px;
+            padding: 11px 14px 10px 14px;
+            min-height: 88px !important;
             width: 100%;
             overflow: hidden;
             box-sizing: border-box;
@@ -256,25 +268,25 @@ st.markdown(
             line-height: 1.25;
         }
         .metric-value {
-            font-size: clamp(20px, 1.8vw, 28px) !important;
+            font-size: clamp(19px, 1.7vw, 26px) !important;
             color: var(--first-text);
             font-weight: 900;
-            margin-top: 7px;
+            margin-top: 5px;
             line-height: 1.08;
             white-space: normal;
             overflow-wrap: anywhere;
             word-break: normal !important;
         }
         .metric-value.long-text {
-            font-size: clamp(17px, 1.45vw, 23px) !important;
+            font-size: clamp(16px, 1.35vw, 21px) !important;
             line-height: 1.15;
         }
         .metric-help {
-            font-size: 12px;
+            font-size: 11.5px;
             color: #7B8798;
-            margin-top: 6px;
-            line-height: 1.25;
-            min-height: 16px;
+            margin-top: 4px;
+            line-height: 1.22;
+            min-height: 14px;
             white-space: normal;
             overflow-wrap: anywhere;
         }
@@ -282,12 +294,12 @@ st.markdown(
         /* Cards nativos do st.metric */
         div[data-testid="stMetric"] {
             background: #FFFFFF;
-            border-radius: 16px;
-            padding: 12px 14px;
+            border-radius: 14px;
+            padding: 10px 13px;
             border: 1px solid var(--first-border-soft);
             border-top: 4px solid var(--first-blue);
             box-shadow: 0 6px 18px rgba(15,39,66,0.055);
-            min-height: 98px;
+            min-height: 84px;
             overflow: visible;
         }
         div[data-testid="stMetric"] label {
@@ -314,17 +326,17 @@ st.markdown(
 
         .section-card {
             background: rgba(255,255,255,.96);
-            border-radius: 18px;
-            padding: 16px;
+            border-radius: 16px;
+            padding: 13px 14px;
             border: 1px solid var(--first-border-soft);
             box-shadow: 0 6px 18px rgba(15,39,66,0.055);
-            margin-bottom: 12px;
+            margin-bottom: 9px;
         }
         .action-card {
             background:#fff;
             border:1px solid var(--first-border-soft);
-            border-radius:16px;
-            padding:13px 14px;
+            border-radius:14px;
+            padding:11px 13px;
             box-shadow: 0 6px 16px rgba(15,39,66,.055);
             border-top: 4px solid #1267A8;
         }
@@ -396,33 +408,33 @@ st.markdown(
             border-radius: 14px !important;
         }
 
-        .compact-header {padding: 18px 24px !important; margin-bottom: 12px !important;}
-        .compact-header h1 {font-size: 29px !important;}
+        .compact-header {padding: 11px 20px !important; margin-bottom: 8px !important;}
+        .compact-header h1 {font-size: 21px !important;}
         .sidebar-spacer {height: 18px;}
         .action-suggestion {
             background:#EAF5FF;
             border:1px solid #B8DAFF;
             border-left:4px solid #1267A8;
             border-radius:14px;
-            padding:10px 14px;
-            margin: 8px 0 12px 0;
+            padding:9px 13px;
+            margin: 6px 0 9px 0;
             color:#0B2341;
             font-weight:800;
         }
         .notif-box {
             background:#FFFFFF;
             border:1px solid #DCE7F3;
-            border-radius:16px;
-            padding:14px;
+            border-radius:14px;
+            padding:12px;
             box-shadow:0 6px 16px rgba(15,39,66,.055);
-            margin:10px 0;
+            margin:8px 0;
         }
         .footer-first {
-            margin-top: 24px;
-            padding: 14px 8px;
+            margin-top: 16px;
+            padding: 10px 8px;
             color: #667085;
             text-align:center;
-            font-size: 13px;
+            font-size: 12.5px;
         }
         .fc-money {font-weight: 850; color:#0B2341;}
         </style>
