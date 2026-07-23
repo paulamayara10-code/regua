@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v9.9 LTS"
+APP_VERSION = "v10.0 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -5719,100 +5719,155 @@ elif page == "Cliente":
     if fila_clientes.empty:
         st.warning("Não há clientes com títulos abertos. Faça o primeiro upload ou verifique a base.")
     else:
-        st.markdown("#### Filtros e resumo")
-        cgeral1, cgeral2 = st.columns([2.4, 1])
-        cgeral1.text_input(
-            "Busca geral",
-            placeholder="Nome, CNPJ, nota, razão social, vendedor ou gerente",
-            key="cliente_geral",
-        )
-        cgeral2.text_input("CNPJ", placeholder="Digite com ou sem pontuação", key="cliente_cnpj")
+        filtros_col, resumo_col = st.columns([1.05, 2.15], gap="large")
 
-        cfilter1, cfilter2, cfilter3 = st.columns([2, 1.1, 2])
-        cfilter1.text_input("Nome / fantasia", placeholder="Digite parte do nome", key="cliente_cliente")
-        cfilter2.text_input("NF / título", placeholder="Nº da nota", key="cliente_nf")
-        cfilter3.text_input("Razão social", placeholder="Digite parte da razão social", key="cliente_razao")
+        with filtros_col:
+            st.markdown("#### Filtros")
+            st.text_input(
+                "Busca geral",
+                placeholder="Nome, CNPJ, nota, razão social, vendedor ou gerente",
+                key="cliente_geral",
+            )
+            st.selectbox(
+                "Ação",
+                ["Todas"] + sorted(fila_clientes["acao_do_dia"].dropna().unique().tolist()),
+                key="cliente_acao",
+            )
+            st.selectbox(
+                "Vendedor",
+                ["Todos"] + sorted(fila_clientes["vendedor"].replace("", "Sem vendedor").dropna().unique().tolist()),
+                key="cliente_vendedor",
+            )
+            st.selectbox(
+                "Gerente",
+                ["Todos"] + sorted(fila_clientes["gerente"].replace("", "Sem gerente").dropna().unique().tolist()),
+                key="cliente_gerente",
+            )
 
-        cfilter4, cfilter5 = st.columns(2)
-        cfilter4.selectbox("Vendedor", ["Todos"] + sorted(fila_clientes["vendedor"].replace("", "Sem vendedor").dropna().unique().tolist()), key="cliente_vendedor")
-        cfilter5.selectbox("Gerente", ["Todos"] + sorted(fila_clientes["gerente"].replace("", "Sem gerente").dropna().unique().tolist()), key="cliente_gerente")
+            with st.expander("Mais filtros", expanded=False):
+                st.text_input("CNPJ", placeholder="Digite com ou sem pontuação", key="cliente_cnpj")
+                st.text_input("NF / título", placeholder="Nº da nota", key="cliente_nf")
+                st.text_input("Razão social", placeholder="Digite parte da razão social", key="cliente_razao")
+                st.text_input("Nome / fantasia", placeholder="Digite parte do nome", key="cliente_cliente")
+                st.selectbox(
+                    "Responsável",
+                    ["Todos", "Sem vendedor ou gerente", "Sem vendedor", "Sem gerente"],
+                    key="cliente_resp",
+                )
+                st.selectbox(
+                    "Segmento",
+                    ["Todos"] + sorted(fila_clientes["segmento"].replace("", "Sem segmento").dropna().unique().tolist()),
+                    key="cliente_segmento",
+                )
+                st.selectbox(
+                    "Tipo de cliente",
+                    ["Todos", "Especial", "Não especial"],
+                    key="cliente_tipo_cliente",
+                )
+                st.selectbox(
+                    "Cobrador",
+                    ["Todos"] + sorted(fila_clientes["cobrador"].replace("", "Sem cobrador").dropna().unique().tolist()),
+                    key="cliente_cobrador",
+                )
 
-        cfilter_acao, cfilter_resp = st.columns([1.2, 1.4])
-        cfilter_acao.selectbox("Ação", ["Todas"] + sorted(fila_clientes["acao_do_dia"].dropna().unique().tolist()), key="cliente_acao")
-        cfilter_resp.selectbox("Responsável", ["Todos", "Sem vendedor ou gerente", "Sem vendedor", "Sem gerente"], key="cliente_resp")
-        cfilter6, cfilter7, cfilter8 = st.columns(3)
-        cfilter6.selectbox("Segmento", ["Todos"] + sorted(fila_clientes["segmento"].replace("", "Sem segmento").dropna().unique().tolist()), key="cliente_segmento")
-        cfilter7.selectbox("Tipo de cliente", ["Todos", "Especial", "Não especial"], key="cliente_tipo_cliente")
-        cfilter8.selectbox("Cobrador", ["Todos"] + sorted(fila_clientes["cobrador"].replace("", "Sem cobrador").dropna().unique().tolist()), key="cliente_cobrador")
+            if st.button("Limpar filtros", key="cliente_limpar_filtros", use_container_width=True):
+                defaults = {
+                    "cliente_geral": "",
+                    "cliente_cnpj": "",
+                    "cliente_nf": "",
+                    "cliente_razao": "",
+                    "cliente_cliente": "",
+                    "cliente_acao": "Todas",
+                    "cliente_vendedor": "Todos",
+                    "cliente_gerente": "Todos",
+                    "cliente_resp": "Todos",
+                    "cliente_segmento": "Todos",
+                    "cliente_tipo_cliente": "Todos",
+                    "cliente_cobrador": "Todos",
+                }
+                for _k, _v in defaults.items():
+                    st.session_state[_k] = _v
+                st.rerun()
 
         options = apply_fila_filters(fila_clientes, prefix="cliente")
-        # Segurança extra: a chave já está normalizada; cada cliente aparece uma única vez,
-        # independentemente da ação individual de cada título.
         options = options.drop_duplicates(subset=["cliente_id"], keep="first").reset_index(drop=True)
         if options.empty:
             st.warning("Nenhum cliente encontrado com os filtros atuais.")
             st.stop()
 
-        resumo_c1, resumo_c2, resumo_c3, resumo_c4 = st.columns(4)
-        with resumo_c1:
-            metric_card("Clientes", int(options["cliente_id"].nunique()), "No filtro")
-        with resumo_c2:
-            metric_card("Títulos", int(pd.to_numeric(options.get("qtd_titulos", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()), "Em aberto")
-        with resumo_c3:
-            metric_card("Saldo", br_money(float(pd.to_numeric(options.get("saldo_total", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())), "Total filtrado")
-        with resumo_c4:
-            maior_atraso_resumo = int(pd.to_numeric(options.get("maior_dias_atraso", pd.Series(dtype=float)), errors="coerce").max() or 0)
-            metric_card("Maior atraso", f"{maior_atraso_resumo} dia(s)", "No filtro")
+        total_options = len(options)
 
-        with st.expander("Ver clientes encontrados no filtro", expanded=False):
-            resumo_cols = [c for c in ["nome_cliente", "razao_social", "cnpj", "qtd_titulos", "saldo_total", "maior_dias_atraso", "variacoes_cadastro", "vendedor", "gerente", "notas_cliente"] if c in options.columns]
-            resumo_clientes = options[resumo_cols].copy()
-            if "saldo_total" in resumo_clientes.columns:
-                resumo_clientes["saldo_total"] = resumo_clientes["saldo_total"].apply(br_money)
-            st.dataframe(
-                resumo_clientes.rename(columns={
-                    "nome_cliente": "Cliente",
-                    "razao_social": "Razão social",
-                    "cnpj": "CNPJ",
-                    "qtd_titulos": "Títulos",
-                    "saldo_total": "Saldo",
-                    "maior_dias_atraso": "Maior atraso",
-                    "variacoes_cadastro": "Variações agrupadas",
-                    "vendedor": "Vendedor",
-                    "gerente": "Gerente",
-                    "notas_cliente": "Notas",
-                }),
-                use_container_width=True,
-                hide_index=True,
+        with resumo_col:
+            st.markdown("#### Resumo")
+            resumo_c1, resumo_c2, resumo_c3, resumo_c4 = st.columns(4)
+            with resumo_c1:
+                metric_card("Clientes", int(options["cliente_id"].nunique()), "No filtro")
+            with resumo_c2:
+                metric_card(
+                    "Títulos",
+                    int(pd.to_numeric(options.get("qtd_titulos", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()),
+                    "Em aberto",
+                )
+            with resumo_c3:
+                metric_card(
+                    "Saldo",
+                    br_money(float(pd.to_numeric(options.get("saldo_total", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())),
+                    "Total filtrado",
+                )
+            with resumo_c4:
+                maior_atraso_resumo = int(pd.to_numeric(options.get("maior_dias_atraso", pd.Series(dtype=float)), errors="coerce").max() or 0)
+                metric_card("Maior atraso", f"{maior_atraso_resumo} dia(s)", "No filtro")
+
+            with st.expander("Ver clientes encontrados no filtro", expanded=False):
+                resumo_cols = [c for c in ["nome_cliente", "razao_social", "cnpj", "qtd_titulos", "saldo_total", "maior_dias_atraso", "variacoes_cadastro", "vendedor", "gerente", "notas_cliente"] if c in options.columns]
+                resumo_clientes = options[resumo_cols].copy()
+                if "saldo_total" in resumo_clientes.columns:
+                    resumo_clientes["saldo_total"] = resumo_clientes["saldo_total"].apply(br_money)
+                st.dataframe(
+                    resumo_clientes.rename(columns={
+                        "nome_cliente": "Cliente",
+                        "razao_social": "Razão social",
+                        "cnpj": "CNPJ",
+                        "qtd_titulos": "Títulos",
+                        "saldo_total": "Saldo",
+                        "maior_dias_atraso": "Maior atraso",
+                        "variacoes_cadastro": "Variações agrupadas",
+                        "vendedor": "Vendedor",
+                        "gerente": "Gerente",
+                        "notas_cliente": "Notas",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            if "cliente_index" not in st.session_state:
+                st.session_state["cliente_index"] = 0
+            st.session_state["cliente_index"] = min(max(int(st.session_state["cliente_index"]), 0), total_options - 1)
+
+            nav_a, nav_b, nav_c, nav_d = st.columns([1, 1, 0.8, 1])
+            if nav_a.button("Cliente anterior", use_container_width=True, disabled=st.session_state["cliente_index"] <= 0):
+                st.session_state["cliente_index"] = max(st.session_state["cliente_index"] - 1, 0)
+                st.rerun()
+            if nav_b.button("Próximo cliente", use_container_width=True, disabled=st.session_state["cliente_index"] >= total_options - 1):
+                st.session_state["cliente_index"] = min(st.session_state["cliente_index"] + 1, total_options - 1)
+                st.rerun()
+            pos_desejada = int(nav_c.number_input("Ir para", min_value=1, max_value=total_options, value=int(st.session_state["cliente_index"]) + 1, step=1, label_visibility="visible"))
+            if nav_d.button(f"Abrir cliente {pos_desejada}/{total_options}", use_container_width=True):
+                st.session_state["cliente_index"] = pos_desejada - 1
+                st.rerun()
+            st.caption(f"Cliente {st.session_state['cliente_index'] + 1}/{total_options} na fila filtrada")
+
+            options["ordem_fila"] = options.index + 1
+            options["label"] = options.apply(
+                lambda r: f"{int(r['ordem_fila'])}/{total_options} • {r['nome_cliente']} • {int(r['qtd_titulos'])} título(s) • {br_money(r['saldo_total'])} • {r['acao_do_dia']}",
+                axis=1,
+            )
+            selected_label = st.selectbox(
+                "Selecione o cliente para ação única",
+                options["label"].tolist(),
+                index=int(st.session_state["cliente_index"]),
             )
 
-        total_options = len(options)
-        if "cliente_index" not in st.session_state:
-            st.session_state["cliente_index"] = 0
-        st.session_state["cliente_index"] = min(int(st.session_state.get("cliente_index", 0) or 0), total_options - 1)
-
-        nav_a, nav_b, nav_c, nav_d = st.columns([1, 1, 1.15, 1.8])
-        if nav_a.button("Cliente anterior", use_container_width=True, disabled=st.session_state["cliente_index"] <= 0):
-            st.session_state["cliente_index"] = max(st.session_state["cliente_index"] - 1, 0)
-            st.rerun()
-        if nav_b.button("Próximo cliente", use_container_width=True, disabled=st.session_state["cliente_index"] >= total_options - 1):
-            st.session_state["cliente_index"] = min(st.session_state["cliente_index"] + 1, total_options - 1)
-            st.rerun()
-        pos_desejada = int(nav_c.number_input("Ir para", min_value=1, max_value=total_options, value=int(st.session_state["cliente_index"]) + 1, step=1, label_visibility="visible"))
-        if nav_d.button(f"Abrir cliente {pos_desejada}/{total_options}", use_container_width=True):
-            st.session_state["cliente_index"] = pos_desejada - 1
-            st.rerun()
-        st.caption(f"Cliente {st.session_state['cliente_index'] + 1}/{total_options} na fila filtrada")
-
-        options["ordem_fila"] = options.index + 1
-        options["label"] = options.apply(
-            lambda r: f"{int(r['ordem_fila'])}/{total_options} • {r['nome_cliente']} • {int(r['qtd_titulos'])} título(s) • {br_money(r['saldo_total'])} • {r['acao_do_dia']}", axis=1
-        )
-        selected_label = st.selectbox(
-            "Selecione o cliente para ação única",
-            options["label"].tolist(),
-            index=int(st.session_state["cliente_index"]),
-        )
         selected_pos = int(options.index[options["label"] == selected_label][0])
         st.session_state["cliente_index"] = selected_pos
         selected = options.iloc[selected_pos]
