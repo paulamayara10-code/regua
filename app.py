@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v10.3 LTS"
+APP_VERSION = "v10.4 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -115,12 +115,11 @@ st.markdown(
         :root {
             --first-navy: #0B2341;
             --first-blue: #1267A8;
-            --first-blue-2: #1B75BB;
             --first-sky: #EAF5FF;
-            --first-bg: #F5F8FC;
+            --first-bg: #F6F9FC;
             --first-card: #FFFFFF;
-            --first-border: #D8E4F0;
-            --first-border-soft: #E8EEF6;
+            --first-border: #E1EAF4;
+            --first-border-soft: #EEF3F8;
             --first-text: #101828;
             --first-muted: #667085;
             --first-green: #12B76A;
@@ -129,18 +128,13 @@ st.markdown(
         }
 
         .main, [data-testid="stAppViewContainer"] {
-            background: linear-gradient(180deg, #F3F8FD 0%, #F7F9FC 48%, #F4F7FB 100%);
+            background: linear-gradient(180deg, #F3F8FD 0%, #F7F9FC 46%, #F5F7FA 100%);
         }
 
         .block-container {
-            padding-top: .55rem;
-            padding-bottom: 1.4rem;
-            padding-left: 2.1rem;
-            padding-right: 2.1rem;
-            max-width: 1680px;
-        }
-        @media (min-width: 1720px) {
-            .block-container { max-width: 92vw; }
+            padding-top: .85rem;
+            padding-bottom: 1.7rem;
+            max-width: 1500px;
         }
 
         /* Sidebar */
@@ -155,28 +149,15 @@ st.markdown(
             background: #FFFFFF !important;
         }
         [data-testid="stSidebar"] [data-baseweb="input"] * {color: #0B2341 !important;}
-        [data-testid="stSidebar"] .stButton button {
-            border-radius: 12px;
-            border: 1px solid rgba(255,255,255,.25);
-            background: rgba(255,255,255,.08);
-            color: #fff;
-        }
-        section[data-testid="stSidebar"] {
-            width: 252px !important;
-            min-width: 252px !important;
-        }
-        section[data-testid="stSidebar"] > div {
-            width: 252px !important;
-        }
 
         /* Header */
         .first-header {
-            background: linear-gradient(135deg, rgba(11,35,65,.98) 0%, rgba(18,103,168,.96) 66%, rgba(58,166,255,.88) 100%);
+            background: linear-gradient(135deg, rgba(11,35,65,.98) 0%, rgba(18,103,168,.96) 68%, rgba(58,166,255,.84) 100%);
             color: white;
-            padding: 12px 22px;
-            border-radius: 16px;
-            margin-bottom: 10px;
-            box-shadow: 0 10px 28px rgba(15,39,66,0.16);
+            padding: 18px 24px;
+            border-radius: 20px;
+            margin-bottom: 14px;
+            box-shadow: 0 10px 24px rgba(15,39,66,0.14);
             position: relative;
             overflow: hidden;
         }
@@ -192,7 +173,7 @@ st.markdown(
         }
         .first-header h1 {
             margin: 0;
-            font-size: 22px;
+            font-size: 29px;
             font-weight: 900;
             letter-spacing: -.03em;
             color: #FFFFFF !important;
@@ -210,18 +191,18 @@ st.markdown(
             background: rgba(255,255,255,.14);
             border: 1px solid rgba(255,255,255,.22);
             border-radius: 999px;
-            padding: 5px 10px;
-            margin-top: 6px;
-            font-size: 12px;
+            padding: 6px 11px;
+            margin-top: 10px;
+            font-size: 12.5px;
             font-weight: 750;
         }
 
-        /* Titles and spacing */
+        /* Espaçamentos */
         .section-title {
-            font-size: 17px;
+            font-size: 18px;
             font-weight: 850;
             color: #0B2341;
-            margin: 10px 0 6px 0;
+            margin: 13px 0 8px 0;
             letter-spacing: -.01em;
         }
         h1, h2, h3, h4 {
@@ -229,92 +210,119 @@ st.markdown(
             letter-spacing: -.015em;
         }
         h3 {
-            margin-top: .45rem !important;
-            margin-bottom: .4rem !important;
+            margin-top: .55rem !important;
+            margin-bottom: .55rem !important;
         }
         h4 {
-            margin-top: .35rem !important;
-            margin-bottom: .28rem !important;
+            margin-top: .45rem !important;
+            margin-bottom: .35rem !important;
         }
-        div[data-testid="stVerticalBlock"] {gap: .45rem !important;}
-        div[data-testid="stHorizontalBlock"] {gap: .65rem !important;}
+        div[data-testid="stVerticalBlock"] {gap: .58rem !important;}
+        div[data-testid="stHorizontalBlock"] {gap: .85rem !important;}
 
-        /* Cards revisados: mais leves, menores e alinhados */
+        /* Cards limpos: sem altura fixa, sem flex e sem risco de sobreposição */
         .metric-card {
-            background: var(--first-card);
-            border: 1px solid var(--first-border-soft);
-            border-top: 4px solid var(--first-blue);
+            position: relative;
+            background: linear-gradient(180deg, #FFFFFF 0%, #FBFDFF 100%);
+            border: 1px solid var(--first-border);
             border-radius: 14px;
-            padding: 11px 14px 10px 14px;
-            min-height: 88px !important;
+            padding: 12px 14px 13px 14px;
             width: 100%;
-            overflow: hidden;
+            height: auto !important;
+            min-height: 0 !important;
+            overflow: visible !important;
             box-sizing: border-box;
-            box-shadow: 0 6px 18px rgba(15,39,66,0.055);
-            display:flex;
-            flex-direction:column;
-            justify-content:space-between;
+            box-shadow: 0 4px 12px rgba(15,39,66,0.045);
+            display: block !important;
+            margin-bottom: 2px;
+        }
+        .metric-card::before {
+            content: "";
+            display: block;
+            width: 34px;
+            height: 3px;
+            border-radius: 999px;
+            background: #1267A8;
+            margin-bottom: 8px;
         }
         .metric-card:hover {
-            transform: none;
-            box-shadow: 0 8px 22px rgba(15,39,66,0.075);
+            transform: none !important;
+            box-shadow: 0 5px 14px rgba(15,39,66,0.055);
         }
         .metric-label {
-            font-size: 11px;
+            display: block;
+            font-size: 10.5px;
             color: var(--first-muted);
             font-weight: 850;
             text-transform: uppercase;
             letter-spacing: .055em;
             line-height: 1.25;
+            margin: 0;
+            white-space: normal !important;
+            overflow-wrap: anywhere !important;
         }
         .metric-value {
-            font-size: clamp(19px, 1.7vw, 26px) !important;
+            display: block;
+            font-size: clamp(18px, 1.65vw, 25px) !important;
             color: var(--first-text);
             font-weight: 900;
-            margin-top: 5px;
-            line-height: 1.08;
-            white-space: normal;
-            overflow-wrap: anywhere;
-            word-break: normal !important;
+            margin: 5px 0 0 0;
+            line-height: 1.16 !important;
+            white-space: normal !important;
+            overflow-wrap: anywhere !important;
+            word-break: break-word !important;
+            overflow: visible !important;
         }
         .metric-value.long-text {
-            font-size: clamp(16px, 1.35vw, 21px) !important;
-            line-height: 1.15;
+            font-size: clamp(15px, 1.25vw, 20px) !important;
+            line-height: 1.2 !important;
         }
         .metric-help {
+            display: block;
             font-size: 11.5px;
             color: #7B8798;
-            margin-top: 4px;
-            line-height: 1.22;
-            min-height: 14px;
-            white-space: normal;
-            overflow-wrap: anywhere;
+            margin: 5px 0 0 0;
+            line-height: 1.25 !important;
+            min-height: 0 !important;
+            white-space: normal !important;
+            overflow-wrap: anywhere !important;
+            overflow: visible !important;
         }
 
-        /* Cards nativos do st.metric */
+        /* st.metric nativo */
         div[data-testid="stMetric"] {
-            background: #FFFFFF;
+            background: linear-gradient(180deg, #FFFFFF 0%, #FBFDFF 100%);
             border-radius: 14px;
-            padding: 10px 13px;
-            border: 1px solid var(--first-border-soft);
-            border-top: 4px solid var(--first-blue);
-            box-shadow: 0 6px 18px rgba(15,39,66,0.055);
-            min-height: 84px;
-            overflow: visible;
+            padding: 12px 14px 13px 14px;
+            border: 1px solid var(--first-border);
+            box-shadow: 0 4px 12px rgba(15,39,66,0.045);
+            height: auto !important;
+            min-height: 0 !important;
+            overflow: visible !important;
+        }
+        div[data-testid="stMetric"]::before {
+            content: "";
+            display: block;
+            width: 34px;
+            height: 3px;
+            border-radius: 999px;
+            background: #1267A8;
+            margin-bottom: 8px;
         }
         div[data-testid="stMetric"] label {
             white-space: normal !important;
             overflow-wrap: anywhere !important;
             color: var(--first-muted) !important;
-            font-weight: 800 !important;
-            font-size: 11px !important;
+            font-weight: 850 !important;
+            font-size: 10.5px !important;
+            line-height: 1.25 !important;
         }
         div[data-testid="stMetricValue"] {
-            font-size: clamp(19px, 1.75vw, 27px) !important;
+            font-size: clamp(18px, 1.65vw, 25px) !important;
             white-space: normal !important;
             overflow: visible !important;
             text-overflow: unset !important;
-            line-height: 1.12 !important;
+            line-height: 1.16 !important;
             color: var(--first-text) !important;
             font-weight: 900 !important;
         }
@@ -327,48 +335,58 @@ st.markdown(
         .section-card {
             background: rgba(255,255,255,.96);
             border-radius: 16px;
-            padding: 13px 14px;
-            border: 1px solid var(--first-border-soft);
-            box-shadow: 0 6px 18px rgba(15,39,66,0.055);
-            margin-bottom: 9px;
+            padding: 15px;
+            border: 1px solid var(--first-border);
+            box-shadow: 0 4px 12px rgba(15,39,66,0.045);
+            margin-bottom: 12px;
         }
         .action-card {
             background:#fff;
-            border:1px solid var(--first-border-soft);
+            border:1px solid var(--first-border);
             border-radius:14px;
-            padding:11px 13px;
-            box-shadow: 0 6px 16px rgba(15,39,66,.055);
-            border-top: 4px solid #1267A8;
+            padding:12px 13px;
+            box-shadow: 0 4px 12px rgba(15,39,66,.045);
+        }
+        .action-card::before {
+            content:"";
+            display:block;
+            width:34px;
+            height:3px;
+            border-radius:999px;
+            background:#1267A8;
+            margin-bottom:8px;
         }
         .action-title {
-            font-size: 12px;
+            font-size: 11px;
             color: #667085;
             font-weight: 850;
             text-transform: uppercase;
             letter-spacing: .04em;
         }
         .action-value {
-            font-size: 22px;
+            font-size: 20px;
             color:#0B2341;
             font-weight: 900;
             margin-top: 4px;
+            line-height: 1.18;
+            overflow-wrap: anywhere;
         }
         .small-muted {color:#667085; font-size:13px;}
 
         /* Alerts */
-        .first-alert-ok {background:#ECFDF3; border:1px solid #ABEFC6; color:#067647; border-radius:14px; padding:10px 13px; font-weight:700;}
-        .first-alert-warn {background:#FFFAEB; border:1px solid #FEDF89; color:#B54708; border-radius:14px; padding:10px 13px; font-weight:700;}
-        .first-alert-danger {background:#FEF3F2; border:1px solid #FECDCA; color:#B42318; border-radius:14px; padding:10px 13px; font-weight:700;}
+        .first-alert-ok {background:#ECFDF3; border:1px solid #ABEFC6; color:#067647; border-radius:13px; padding:10px 13px; font-weight:700;}
+        .first-alert-warn {background:#FFFAEB; border:1px solid #FEDF89; color:#B54708; border-radius:13px; padding:10px 13px; font-weight:700;}
+        .first-alert-danger {background:#FEF3F2; border:1px solid #FECDCA; color:#B42318; border-radius:13px; padding:10px 13px; font-weight:700;}
 
         /* Inputs e botões */
         .stButton button, .stDownloadButton button {
-            border-radius: 12px !important;
+            border-radius: 11px !important;
             font-weight: 800 !important;
             min-height: 38px;
             box-shadow: none !important;
         }
         [data-baseweb="input"], [data-baseweb="select"], [data-baseweb="textarea"] {
-            border-radius: 12px !important;
+            border-radius: 11px !important;
             min-height: 38px !important;
         }
         [data-baseweb="input"] input {
@@ -387,15 +405,15 @@ st.markdown(
         /* Tabelas e abas */
         div[data-testid="stDataFrame"] {
             background:white;
-            border-radius: 14px;
+            border-radius: 13px;
             overflow: hidden;
-            border: 1px solid var(--first-border-soft);
+            border: 1px solid var(--first-border);
         }
         .stTabs [data-baseweb="tab-list"] {gap: 7px;}
         .stTabs [data-baseweb="tab"] {
             border-radius: 999px;
             background: #FFFFFF;
-            border: 1px solid var(--first-border-soft);
+            border: 1px solid var(--first-border);
             padding: 7px 14px;
         }
         .stTabs [aria-selected="true"] {
@@ -405,19 +423,19 @@ st.markdown(
         }
         .stExpander {
             margin-top: .25rem !important;
-            border-radius: 14px !important;
+            border-radius: 13px !important;
         }
 
-        .compact-header {padding: 11px 20px !important; margin-bottom: 8px !important;}
-        .compact-header h1 {font-size: 21px !important;}
+        .compact-header {padding: 18px 24px !important; margin-bottom: 12px !important;}
+        .compact-header h1 {font-size: 29px !important;}
         .sidebar-spacer {height: 18px;}
         .action-suggestion {
             background:#EAF5FF;
             border:1px solid #B8DAFF;
             border-left:4px solid #1267A8;
-            border-radius:14px;
-            padding:9px 13px;
-            margin: 6px 0 9px 0;
+            border-radius:13px;
+            padding:10px 14px;
+            margin: 8px 0 12px 0;
             color:#0B2341;
             font-weight:800;
         }
@@ -425,16 +443,16 @@ st.markdown(
             background:#FFFFFF;
             border:1px solid #DCE7F3;
             border-radius:14px;
-            padding:12px;
-            box-shadow:0 6px 16px rgba(15,39,66,.055);
-            margin:8px 0;
+            padding:14px;
+            box-shadow:0 4px 12px rgba(15,39,66,.045);
+            margin:10px 0;
         }
         .footer-first {
-            margin-top: 16px;
-            padding: 10px 8px;
+            margin-top: 24px;
+            padding: 14px 8px;
             color: #667085;
             text-align:center;
-            font-size: 12.5px;
+            font-size: 13px;
         }
         .fc-money {font-weight: 850; color:#0B2341;}
         </style>
@@ -5090,7 +5108,7 @@ def metric_card(label: str, value: str, help_text: str = "", long_text: bool = F
     value_class = "metric-value long-text" if long_text else "metric-value"
     st.markdown(
         f"""
-        <div class="metric-card">
+        <div class="metric-card" title="{html.escape(str(label))}: {html.escape(str(value))}">
             <div class="metric-label">{html.escape(str(label))}</div>
             <div class="{value_class}">{html.escape(str(value))}</div>
             <div class="metric-help">{html.escape(str(help_text))}</div>
