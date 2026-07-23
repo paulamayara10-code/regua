@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v10.4 LTS"
+APP_VERSION = "v10.5 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -226,20 +226,20 @@ st.markdown(
             background: linear-gradient(180deg, #FFFFFF 0%, #FBFDFF 100%);
             border: 1px solid var(--first-border);
             border-radius: 14px;
-            padding: 12px 14px 13px 14px;
+            padding: 12px 14px 12px 14px;
             width: 100%;
             height: auto !important;
             min-height: 0 !important;
             overflow: visible !important;
             box-sizing: border-box;
-            box-shadow: 0 4px 12px rgba(15,39,66,0.045);
+            box-shadow: 0 3px 10px rgba(15,39,66,0.04);
             display: block !important;
             margin-bottom: 2px;
         }
         .metric-card::before {
             content: "";
             display: block;
-            width: 34px;
+            width: 28px;
             height: 3px;
             border-radius: 999px;
             background: #1267A8;
@@ -263,18 +263,18 @@ st.markdown(
         }
         .metric-value {
             display: block;
-            font-size: clamp(18px, 1.65vw, 25px) !important;
+            font-size: clamp(17px, 1.45vw, 23px) !important;
             color: var(--first-text);
             font-weight: 900;
             margin: 5px 0 0 0;
-            line-height: 1.16 !important;
+            line-height: 1.12 !important;
             white-space: normal !important;
             overflow-wrap: anywhere !important;
             word-break: break-word !important;
             overflow: visible !important;
         }
         .metric-value.long-text {
-            font-size: clamp(15px, 1.25vw, 20px) !important;
+            font-size: clamp(14px, 1.1vw, 18px) !important;
             line-height: 1.2 !important;
         }
         .metric-help {
@@ -282,7 +282,7 @@ st.markdown(
             font-size: 11.5px;
             color: #7B8798;
             margin: 5px 0 0 0;
-            line-height: 1.25 !important;
+            line-height: 1.18 !important;
             min-height: 0 !important;
             white-space: normal !important;
             overflow-wrap: anywhere !important;
@@ -293,9 +293,9 @@ st.markdown(
         div[data-testid="stMetric"] {
             background: linear-gradient(180deg, #FFFFFF 0%, #FBFDFF 100%);
             border-radius: 14px;
-            padding: 12px 14px 13px 14px;
+            padding: 12px 14px 12px 14px;
             border: 1px solid var(--first-border);
-            box-shadow: 0 4px 12px rgba(15,39,66,0.045);
+            box-shadow: 0 3px 10px rgba(15,39,66,0.04);
             height: auto !important;
             min-height: 0 !important;
             overflow: visible !important;
@@ -303,7 +303,7 @@ st.markdown(
         div[data-testid="stMetric"]::before {
             content: "";
             display: block;
-            width: 34px;
+            width: 28px;
             height: 3px;
             border-radius: 999px;
             background: #1267A8;
@@ -315,14 +315,14 @@ st.markdown(
             color: var(--first-muted) !important;
             font-weight: 850 !important;
             font-size: 10.5px !important;
-            line-height: 1.25 !important;
+            line-height: 1.18 !important;
         }
         div[data-testid="stMetricValue"] {
-            font-size: clamp(18px, 1.65vw, 25px) !important;
+            font-size: clamp(17px, 1.45vw, 23px) !important;
             white-space: normal !important;
             overflow: visible !important;
             text-overflow: unset !important;
-            line-height: 1.16 !important;
+            line-height: 1.12 !important;
             color: var(--first-text) !important;
             font-weight: 900 !important;
         }
@@ -337,7 +337,7 @@ st.markdown(
             border-radius: 16px;
             padding: 15px;
             border: 1px solid var(--first-border);
-            box-shadow: 0 4px 12px rgba(15,39,66,0.045);
+            box-shadow: 0 3px 10px rgba(15,39,66,0.04);
             margin-bottom: 12px;
         }
         .action-card {
@@ -1551,6 +1551,14 @@ def br_money_short(value: float | int | None) -> str:
     else:
         txt = f"{sign}R$ {abs_value:,.2f}"
     return txt.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def int_br(value: int | float | None) -> str:
+    try:
+        value = int(float(value or 0))
+    except Exception:
+        value = 0
+    return f"{value:,}".replace(",", ".")
 
 
 def to_date_str(value) -> Optional[str]:
@@ -6138,24 +6146,20 @@ elif page == "Cliente":
 
         with resumo_col:
             st.markdown("#### Resumo")
-            resumo_c1, resumo_c2, resumo_c3, resumo_c4 = st.columns(4)
+            total_clientes_resumo = int(options["cliente_id"].nunique())
+            total_titulos_resumo = int(pd.to_numeric(options.get("qtd_titulos", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+            saldo_total_resumo = float(pd.to_numeric(options.get("saldo_total", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+            maior_atraso_resumo = int(pd.to_numeric(options.get("maior_dias_atraso", pd.Series(dtype=float)), errors="coerce").max() or 0)
+
+            resumo_c1, resumo_c2, resumo_c3, resumo_c4 = st.columns([1, 1, 1.2, 1.1])
             with resumo_c1:
-                metric_card("Clientes", int(options["cliente_id"].nunique()), "No filtro")
+                metric_card("Clientes", int_br(total_clientes_resumo), "No filtro")
             with resumo_c2:
-                metric_card(
-                    "Títulos",
-                    int(pd.to_numeric(options.get("qtd_titulos", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()),
-                    "Em aberto",
-                )
+                metric_card("Títulos", int_br(total_titulos_resumo), "Em aberto")
             with resumo_c3:
-                metric_card(
-                    "Saldo",
-                    br_money(float(pd.to_numeric(options.get("saldo_total", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())),
-                    "Total filtrado",
-                )
+                metric_card("Saldo", br_money_short(saldo_total_resumo), br_money(saldo_total_resumo), long_text=True)
             with resumo_c4:
-                maior_atraso_resumo = int(pd.to_numeric(options.get("maior_dias_atraso", pd.Series(dtype=float)), errors="coerce").max() or 0)
-                metric_card("Maior atraso", f"{maior_atraso_resumo} dia(s)", "No filtro")
+                metric_card("Maior atraso", f"{int_br(maior_atraso_resumo)} dias", "No filtro", long_text=True)
 
             with st.expander("Ver clientes encontrados no filtro", expanded=False):
                 resumo_cols = [c for c in ["nome_cliente", "razao_social", "cnpj", "qtd_titulos", "saldo_total", "maior_dias_atraso", "variacoes_cadastro", "vendedor", "gerente", "notas_cliente"] if c in options.columns]
