@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v10.7 LTS"
+APP_VERSION = "v10.8 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -98,6 +98,7 @@ NOTIFICACAO_MODELO_OFICIAL_B64 = """JVBERi0xLjcKCjQgMCBvYmoKKElkZW50aXR5KQplbmRv
 
 PERFIS_USUARIO = ["Administrador", "Operação"]
 SESSION_USER_KEY = "crm_authenticated_user"
+LOGIN_FALLBACK_LOGO_B64 = "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"
 
 
 # -----------------------------------------------------------------------------
@@ -1507,45 +1508,32 @@ def logout_usuario() -> None:
 
 
 
-def _mime_from_logo_path(path: str) -> str:
-    ext = str(path or "").lower().rsplit(".", 1)[-1]
-    if ext in {"jpg", "jpeg"}:
-        return "image/jpeg"
-    if ext == "webp":
-        return "image/webp"
-    if ext == "svg":
-        return "image/svg+xml"
-    if ext == "ico":
-        return "image/x-icon"
-    return "image/png"
-
-
 @st.cache_data(ttl=3600, show_spinner=False)
-def login_logo_html_cached() -> str:
+def login_logo_bytes_cached() -> bytes:
+    """Carrega um logo local sem depender de HTML. Se não existir, usa logo interno."""
     candidates = [
         "logo.png", "Logo.png", "LOGO.png", "logo_first.png", "logo-first.png",
         "first_logo.png", "first-medical-logo.png", "logo_first_medical.png",
         "assets/logo.png", "assets/Logo.png", "static/logo.png", "images/logo.png",
-        "dados/logo.png", "dados/Logo.png", "logo.ico", "dados/logo.ico",
+        "dados/logo.png", "dados/Logo.png",
     ]
     for cand in candidates:
         try:
             p = Path(cand)
             if p.exists() and p.is_file() and p.stat().st_size > 200:
-                data = p.read_bytes()
-                b64 = base64.b64encode(data).decode("ascii")
-                return f'<div class="login-logo-wrap"><img class="login-logo-img" src="data:{_mime_from_logo_path(cand)};base64,{b64}" alt="FIRST MEDICAL"></div>'
+                return p.read_bytes()
         except Exception:
             pass
-    return """
-        <div class="login-logo-fallback">
-            <div class="login-logo-mark">F</div>
-            <div>
-                <div class="login-logo-name">FIRST MEDICAL</div>
-                <div class="login-logo-caption">CRM FINANCEIRO</div>
-            </div>
-        </div>
-    """
+    return base64.b64decode(LOGIN_FALLBACK_LOGO_B64)
+
+
+def render_login_brand() -> None:
+    """Renderiza o cabeçalho do login com componentes nativos do Streamlit."""
+    left, center, right = st.columns([1, 1.05, 1])
+    with center:
+        st.image(BytesIO(login_logo_bytes_cached()), width=235)
+    st.markdown("### CRM de Cobrança")
+    st.caption("Selecione seu usuário e informe a senha.")
 
 
 def render_auth_gate() -> None:
@@ -1553,116 +1541,43 @@ def render_auth_gate() -> None:
     if current_user():
         return
 
-    login_html = f"""<style>
-[data-testid="stAppViewContainer"] {{
-    background: linear-gradient(145deg, #EAF5FF 0%, #F8FBFF 46%, #DDEEFF 100%) !important;
-}}
-[data-testid="stForm"] {{
-    background: linear-gradient(135deg, #0B2341 0%, #1267A8 100%) !important;
-    border: 1px solid rgba(255,255,255,.28) !important;
-    border-radius: 22px !important;
-    padding: 22px !important;
-    box-shadow: 0 18px 42px rgba(11,35,65,.20) !important;
-}}
-[data-testid="stForm"] label, [data-testid="stForm"] p {{color: #FFFFFF !important;}}
-[data-testid="stForm"] input {{
-    background: #FFFFFF !important;
-    color: #0B2341 !important;
-}}
-[data-testid="stForm"] input:not([type="password"]) {{
-    text-transform: uppercase !important;
-}}
-[data-testid="stForm"] [data-baseweb="select"] > div {{
-    background: #FFFFFF !important;
-    color: #0B2341 !important;
-}}
-[data-testid="stFormSubmitButton"] button {{
-    background: #58B3FF !important;
-    color: #0B2341 !important;
-    border: none !important;
-    border-radius: 12px !important;
-    font-weight: 900 !important;
-}}
-.login-shell {{
-    max-width: 520px;
-    margin: 28px auto 12px auto;
-    text-align: center;
-}}
-.login-card {{
-    background: rgba(255,255,255,.78);
-    border: 1px solid rgba(18,103,168,.18);
-    border-radius: 24px;
-    padding: 24px 26px 22px 26px;
-    box-shadow: 0 16px 38px rgba(11,35,65,.12);
-    backdrop-filter: blur(8px);
-}}
-.login-logo-wrap {{
-    display:flex;
-    justify-content:center;
-    margin-bottom: 12px;
-}}
-.login-logo-img {{
-    max-width: 190px;
-    max-height: 82px;
-    object-fit: contain;
-}}
-.login-logo-fallback {{
-    display:inline-flex;
-    align-items:center;
-    gap:12px;
-    margin-bottom: 12px;
-    padding: 10px 14px;
-    border-radius: 18px;
-    background: #FFFFFF;
-    border: 1px solid #DCE7F3;
-}}
-.login-logo-mark {{
-    width: 42px;
-    height: 42px;
-    border-radius: 14px;
-    background: linear-gradient(135deg, #0B2341, #1267A8);
-    color:#FFFFFF;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    font-weight: 950;
-    font-size: 24px;
-}}
-.login-logo-name {{
-    color:#0B2341;
-    font-weight:950;
-    font-size: 17px;
-    letter-spacing:.04em;
-    text-align:left;
-}}
-.login-logo-caption {{
-    color:#667085;
-    font-weight:800;
-    font-size: 11px;
-    letter-spacing:.08em;
-    text-align:left;
-}}
-.login-title {{
-    color:#0B2341;
-    font-size: 28px;
-    font-weight: 950;
-    letter-spacing: -.03em;
-}}
-.login-subtitle {{
-    color:#667085;
-    font-size: 14px;
-    font-weight: 650;
-    margin-top: 4px;
-}}
-</style>
-<div class="login-shell">
-  <div class="login-card">
-    {login_logo_html_cached()}
-    <div class="login-title">CRM de Cobrança</div>
-    <div class="login-subtitle">Selecione seu usuário e informe a senha.</div>
-  </div>
-</div>"""
-    st.markdown(login_html, unsafe_allow_html=True)
+    st.markdown(
+        """
+        <style>
+          [data-testid="stAppViewContainer"] {
+              background: linear-gradient(145deg, #EAF5FF 0%, #F8FBFF 46%, #DDEEFF 100%) !important;
+          }
+          [data-testid="stForm"] {
+              background: linear-gradient(135deg, #0B2341 0%, #1267A8 100%) !important;
+              border: 1px solid rgba(255,255,255,.28) !important;
+              border-radius: 22px !important;
+              padding: 22px !important;
+              box-shadow: 0 18px 42px rgba(11,35,65,.20) !important;
+          }
+          [data-testid="stForm"] label, [data-testid="stForm"] p {color: #FFFFFF !important;}
+          [data-testid="stForm"] input {
+              background: #FFFFFF !important;
+              color: #0B2341 !important;
+          }
+          [data-testid="stForm"] input:not([type="password"]) {
+              text-transform: uppercase !important;
+          }
+          [data-testid="stForm"] [data-baseweb="select"] > div {
+              background: #FFFFFF !important;
+              color: #0B2341 !important;
+          }
+          [data-testid="stFormSubmitButton"] button {
+              background: #58B3FF !important;
+              color: #0B2341 !important;
+              border: none !important;
+              border-radius: 12px !important;
+              font-weight: 900 !important;
+          }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    render_login_brand()
 
     if count_usuarios() == 0:
         st.info("Primeiro acesso: crie a administradora do CRM. O histórico existente será preservado.")
