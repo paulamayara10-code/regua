@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v10.6 LTS"
+APP_VERSION = "v10.7 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -1553,120 +1553,116 @@ def render_auth_gate() -> None:
     if current_user():
         return
 
-    st.markdown(
-        f"""
-        <style>
-          [data-testid="stAppViewContainer"] {{
-              background: linear-gradient(145deg, #EAF5FF 0%, #F8FBFF 46%, #DDEEFF 100%) !important;
-          }}
-          [data-testid="stForm"] {{
-              background: linear-gradient(135deg, #0B2341 0%, #1267A8 100%) !important;
-              border: 1px solid rgba(255,255,255,.28) !important;
-              border-radius: 22px !important;
-              padding: 22px !important;
-              box-shadow: 0 18px 42px rgba(11,35,65,.20) !important;
-          }}
-          [data-testid="stForm"] label, [data-testid="stForm"] p {{color: #FFFFFF !important;}}
-          [data-testid="stForm"] input {{
-              background: #FFFFFF !important;
-              color: #0B2341 !important;
-          }}
-          [data-testid="stForm"] input:not([type="password"]) {{
-              text-transform: uppercase !important;
-          }}
-          [data-testid="stForm"] [data-baseweb="select"] > div {{
-              background: #FFFFFF !important;
-              color: #0B2341 !important;
-          }}
-          [data-testid="stFormSubmitButton"] button {{
-              background: #58B3FF !important;
-              color: #0B2341 !important;
-              border: none !important;
-              border-radius: 12px !important;
-              font-weight: 900 !important;
-          }}
-          .login-shell {{
-              max-width: 520px;
-              margin: 28px auto 12px auto;
-              text-align: center;
-          }}
-          .login-card {{
-              background: rgba(255,255,255,.78);
-              border: 1px solid rgba(18,103,168,.18);
-              border-radius: 24px;
-              padding: 24px 26px 22px 26px;
-              box-shadow: 0 16px 38px rgba(11,35,65,.12);
-              backdrop-filter: blur(8px);
-          }}
-          .login-logo-wrap {{
-              display:flex;
-              justify-content:center;
-              margin-bottom: 12px;
-          }}
-          .login-logo-img {{
-              max-width: 190px;
-              max-height: 82px;
-              object-fit: contain;
-          }}
-          .login-logo-fallback {{
-              display:inline-flex;
-              align-items:center;
-              gap:12px;
-              margin-bottom: 12px;
-              padding: 10px 14px;
-              border-radius: 18px;
-              background: #FFFFFF;
-              border: 1px solid #DCE7F3;
-          }}
-          .login-logo-mark {{
-              width: 42px;
-              height: 42px;
-              border-radius: 14px;
-              background: linear-gradient(135deg, #0B2341, #1267A8);
-              color:#FFFFFF;
-              display:flex;
-              align-items:center;
-              justify-content:center;
-              font-weight: 950;
-              font-size: 24px;
-          }}
-          .login-logo-name {{
-              color:#0B2341;
-              font-weight:950;
-              font-size: 17px;
-              letter-spacing:.04em;
-              text-align:left;
-          }}
-          .login-logo-caption {{
-              color:#667085;
-              font-weight:800;
-              font-size: 11px;
-              letter-spacing:.08em;
-              text-align:left;
-          }}
-          .login-title {{
-              color:#0B2341;
-              font-size: 28px;
-              font-weight: 950;
-              letter-spacing: -.03em;
-          }}
-          .login-subtitle {{
-              color:#667085;
-              font-size: 14px;
-              font-weight: 650;
-              margin-top: 4px;
-          }}
-        </style>
-        <div class="login-shell">
-          <div class="login-card">
-            {login_logo_html_cached()}
-            <div class="login-title">CRM de Cobrança</div>
-            <div class="login-subtitle">Selecione seu usuário e informe a senha.</div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    login_html = f"""<style>
+[data-testid="stAppViewContainer"] {{
+    background: linear-gradient(145deg, #EAF5FF 0%, #F8FBFF 46%, #DDEEFF 100%) !important;
+}}
+[data-testid="stForm"] {{
+    background: linear-gradient(135deg, #0B2341 0%, #1267A8 100%) !important;
+    border: 1px solid rgba(255,255,255,.28) !important;
+    border-radius: 22px !important;
+    padding: 22px !important;
+    box-shadow: 0 18px 42px rgba(11,35,65,.20) !important;
+}}
+[data-testid="stForm"] label, [data-testid="stForm"] p {{color: #FFFFFF !important;}}
+[data-testid="stForm"] input {{
+    background: #FFFFFF !important;
+    color: #0B2341 !important;
+}}
+[data-testid="stForm"] input:not([type="password"]) {{
+    text-transform: uppercase !important;
+}}
+[data-testid="stForm"] [data-baseweb="select"] > div {{
+    background: #FFFFFF !important;
+    color: #0B2341 !important;
+}}
+[data-testid="stFormSubmitButton"] button {{
+    background: #58B3FF !important;
+    color: #0B2341 !important;
+    border: none !important;
+    border-radius: 12px !important;
+    font-weight: 900 !important;
+}}
+.login-shell {{
+    max-width: 520px;
+    margin: 28px auto 12px auto;
+    text-align: center;
+}}
+.login-card {{
+    background: rgba(255,255,255,.78);
+    border: 1px solid rgba(18,103,168,.18);
+    border-radius: 24px;
+    padding: 24px 26px 22px 26px;
+    box-shadow: 0 16px 38px rgba(11,35,65,.12);
+    backdrop-filter: blur(8px);
+}}
+.login-logo-wrap {{
+    display:flex;
+    justify-content:center;
+    margin-bottom: 12px;
+}}
+.login-logo-img {{
+    max-width: 190px;
+    max-height: 82px;
+    object-fit: contain;
+}}
+.login-logo-fallback {{
+    display:inline-flex;
+    align-items:center;
+    gap:12px;
+    margin-bottom: 12px;
+    padding: 10px 14px;
+    border-radius: 18px;
+    background: #FFFFFF;
+    border: 1px solid #DCE7F3;
+}}
+.login-logo-mark {{
+    width: 42px;
+    height: 42px;
+    border-radius: 14px;
+    background: linear-gradient(135deg, #0B2341, #1267A8);
+    color:#FFFFFF;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-weight: 950;
+    font-size: 24px;
+}}
+.login-logo-name {{
+    color:#0B2341;
+    font-weight:950;
+    font-size: 17px;
+    letter-spacing:.04em;
+    text-align:left;
+}}
+.login-logo-caption {{
+    color:#667085;
+    font-weight:800;
+    font-size: 11px;
+    letter-spacing:.08em;
+    text-align:left;
+}}
+.login-title {{
+    color:#0B2341;
+    font-size: 28px;
+    font-weight: 950;
+    letter-spacing: -.03em;
+}}
+.login-subtitle {{
+    color:#667085;
+    font-size: 14px;
+    font-weight: 650;
+    margin-top: 4px;
+}}
+</style>
+<div class="login-shell">
+  <div class="login-card">
+    {login_logo_html_cached()}
+    <div class="login-title">CRM de Cobrança</div>
+    <div class="login-subtitle">Selecione seu usuário e informe a senha.</div>
+  </div>
+</div>"""
+    st.markdown(login_html, unsafe_allow_html=True)
 
     if count_usuarios() == 0:
         st.info("Primeiro acesso: crie a administradora do CRM. O histórico existente será preservado.")
