@@ -47,7 +47,7 @@ import streamlit as st
 
 APP_NAME = "FIRST MEDICAL SERVICE"
 APP_TITLE = "CRM de Cobrança"
-APP_VERSION = "v10.5 LTS"
+APP_VERSION = "v10.6 LTS"
 DATA_DIR = Path("dados")
 BACKUP_DIR = DATA_DIR / "backup"
 DB_PATH = DATA_DIR / "crm_cobranca_first.db"
@@ -455,7 +455,60 @@ st.markdown(
             font-size: 13px;
         }
         .fc-money {font-weight: 850; color:#0B2341;}
-        </style>
+        
+        /* Entradas em maiúsculas, exceto senha */
+        input:not([type="password"]), textarea {
+            text-transform: uppercase !important;
+        }
+
+        /* Resumo executivo sem cards altos */
+        .summary-strip {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 10px;
+            margin: 4px 0 10px 0;
+        }
+        .summary-item {
+            background: rgba(255,255,255,.92);
+            border: 1px solid #E1EAF4;
+            border-radius: 14px;
+            padding: 10px 12px;
+            box-shadow: 0 3px 10px rgba(15,39,66,.035);
+            min-width: 0;
+        }
+        .summary-item span {
+            display:block;
+            font-size: 10px;
+            color:#667085;
+            font-weight: 850;
+            letter-spacing:.05em;
+            text-transform: uppercase;
+            line-height: 1.2;
+        }
+        .summary-item strong {
+            display:block;
+            color:#0B2341;
+            font-size: clamp(18px, 1.65vw, 24px);
+            font-weight: 950;
+            line-height: 1.08;
+            margin-top: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .summary-item small {
+            display:block;
+            color:#7B8798;
+            font-size: 11px;
+            margin-top: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        @media (max-width: 1050px) {
+            .summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+</style>
     """,
     unsafe_allow_html=True,
 )
@@ -1453,30 +1506,160 @@ def logout_usuario() -> None:
     st.session_state.pop("nav_page", None)
 
 
+
+def _mime_from_logo_path(path: str) -> str:
+    ext = str(path or "").lower().rsplit(".", 1)[-1]
+    if ext in {"jpg", "jpeg"}:
+        return "image/jpeg"
+    if ext == "webp":
+        return "image/webp"
+    if ext == "svg":
+        return "image/svg+xml"
+    if ext == "ico":
+        return "image/x-icon"
+    return "image/png"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def login_logo_html_cached() -> str:
+    candidates = [
+        "logo.png", "Logo.png", "LOGO.png", "logo_first.png", "logo-first.png",
+        "first_logo.png", "first-medical-logo.png", "logo_first_medical.png",
+        "assets/logo.png", "assets/Logo.png", "static/logo.png", "images/logo.png",
+        "dados/logo.png", "dados/Logo.png", "logo.ico", "dados/logo.ico",
+    ]
+    for cand in candidates:
+        try:
+            p = Path(cand)
+            if p.exists() and p.is_file() and p.stat().st_size > 200:
+                data = p.read_bytes()
+                b64 = base64.b64encode(data).decode("ascii")
+                return f'<div class="login-logo-wrap"><img class="login-logo-img" src="data:{_mime_from_logo_path(cand)};base64,{b64}" alt="FIRST MEDICAL"></div>'
+        except Exception:
+            pass
+    return """
+        <div class="login-logo-fallback">
+            <div class="login-logo-mark">F</div>
+            <div>
+                <div class="login-logo-name">FIRST MEDICAL</div>
+                <div class="login-logo-caption">CRM FINANCEIRO</div>
+            </div>
+        </div>
+    """
+
+
 def render_auth_gate() -> None:
     """Exibe criação do primeiro administrador ou tela de login."""
     if current_user():
         return
 
     st.markdown(
-        """
+        f"""
         <style>
-          [data-testid="stAppViewContainer"] {background: linear-gradient(145deg, #EAF5FF 0%, #F8FBFF 46%, #DDEEFF 100%) !important;}
-          [data-testid="stForm"] {background: linear-gradient(135deg, #0B2341 0%, #1267A8 100%) !important; border: 1px solid rgba(255,255,255,.28) !important; border-radius: 24px !important; padding: 22px !important; box-shadow: 0 20px 48px rgba(11,35,65,.22) !important;}
-          [data-testid="stForm"] label, [data-testid="stForm"] p {color: #FFFFFF !important;}
-          [data-testid="stForm"] input {background: #FFFFFF !important; color: #0B2341 !important;}
-          [data-testid="stForm"] [data-baseweb="select"] > div {background: #FFFFFF !important; color: #0B2341 !important;}
-          [data-testid="stFormSubmitButton"] button {background: #58B3FF !important; color: #0B2341 !important; border: none !important;}
-                div[data-testid="stVerticalBlock"] {gap: .55rem !important;}
-        div[data-testid="stHorizontalBlock"] {gap: .75rem !important;}
-        .stTextInput, .stSelectbox, .stDateInput, .stNumberInput {margin-bottom: .15rem !important;}
-        label[data-testid="stWidgetLabel"] {margin-bottom: .15rem !important;}
-        [data-baseweb="input"], [data-baseweb="select"] {min-height: 36px !important;}
-        [data-baseweb="input"] input {padding-top: 6px !important; padding-bottom: 6px !important;}
-        .stExpander {margin-top: .25rem !important;}
+          [data-testid="stAppViewContainer"] {{
+              background: linear-gradient(145deg, #EAF5FF 0%, #F8FBFF 46%, #DDEEFF 100%) !important;
+          }}
+          [data-testid="stForm"] {{
+              background: linear-gradient(135deg, #0B2341 0%, #1267A8 100%) !important;
+              border: 1px solid rgba(255,255,255,.28) !important;
+              border-radius: 22px !important;
+              padding: 22px !important;
+              box-shadow: 0 18px 42px rgba(11,35,65,.20) !important;
+          }}
+          [data-testid="stForm"] label, [data-testid="stForm"] p {{color: #FFFFFF !important;}}
+          [data-testid="stForm"] input {{
+              background: #FFFFFF !important;
+              color: #0B2341 !important;
+          }}
+          [data-testid="stForm"] input:not([type="password"]) {{
+              text-transform: uppercase !important;
+          }}
+          [data-testid="stForm"] [data-baseweb="select"] > div {{
+              background: #FFFFFF !important;
+              color: #0B2341 !important;
+          }}
+          [data-testid="stFormSubmitButton"] button {{
+              background: #58B3FF !important;
+              color: #0B2341 !important;
+              border: none !important;
+              border-radius: 12px !important;
+              font-weight: 900 !important;
+          }}
+          .login-shell {{
+              max-width: 520px;
+              margin: 28px auto 12px auto;
+              text-align: center;
+          }}
+          .login-card {{
+              background: rgba(255,255,255,.78);
+              border: 1px solid rgba(18,103,168,.18);
+              border-radius: 24px;
+              padding: 24px 26px 22px 26px;
+              box-shadow: 0 16px 38px rgba(11,35,65,.12);
+              backdrop-filter: blur(8px);
+          }}
+          .login-logo-wrap {{
+              display:flex;
+              justify-content:center;
+              margin-bottom: 12px;
+          }}
+          .login-logo-img {{
+              max-width: 190px;
+              max-height: 82px;
+              object-fit: contain;
+          }}
+          .login-logo-fallback {{
+              display:inline-flex;
+              align-items:center;
+              gap:12px;
+              margin-bottom: 12px;
+              padding: 10px 14px;
+              border-radius: 18px;
+              background: #FFFFFF;
+              border: 1px solid #DCE7F3;
+          }}
+          .login-logo-mark {{
+              width: 42px;
+              height: 42px;
+              border-radius: 14px;
+              background: linear-gradient(135deg, #0B2341, #1267A8);
+              color:#FFFFFF;
+              display:flex;
+              align-items:center;
+              justify-content:center;
+              font-weight: 950;
+              font-size: 24px;
+          }}
+          .login-logo-name {{
+              color:#0B2341;
+              font-weight:950;
+              font-size: 17px;
+              letter-spacing:.04em;
+              text-align:left;
+          }}
+          .login-logo-caption {{
+              color:#667085;
+              font-weight:800;
+              font-size: 11px;
+              letter-spacing:.08em;
+              text-align:left;
+          }}
+          .login-title {{
+              color:#0B2341;
+              font-size: 28px;
+              font-weight: 950;
+              letter-spacing: -.03em;
+          }}
+          .login-subtitle {{
+              color:#667085;
+              font-size: 14px;
+              font-weight: 650;
+              margin-top: 4px;
+          }}
         </style>
         <div class="login-shell">
           <div class="login-card">
+            {login_logo_html_cached()}
             <div class="login-title">CRM de Cobrança</div>
             <div class="login-subtitle">Selecione seu usuário e informe a senha.</div>
           </div>
@@ -4805,7 +4988,14 @@ def save_regua(df: pd.DataFrame) -> None:
     conn.close()
 
 
-def prepare_fila(ref: date) -> pd.DataFrame:
+def _db_signature() -> float:
+    try:
+        return float(DB_PATH.stat().st_mtime)
+    except Exception:
+        return 0.0
+
+
+def _prepare_fila_uncached(ref: date) -> pd.DataFrame:
     df = load_titulos()
     if df.empty:
         return df
@@ -4877,7 +5067,7 @@ def _single_or_multiple(values: pd.Series, kind: str = "text") -> str:
     return "Vários"
 
 
-def prepare_fila_clientes(ref: date) -> pd.DataFrame:
+def _prepare_fila_clientes_uncached(ref: date) -> pd.DataFrame:
     """Agrupa a fila por cliente para que 15 títulos gerem uma única ação."""
     fila = prepare_fila(ref)
     if fila.empty:
@@ -4991,6 +5181,28 @@ def prepare_fila_clientes(ref: date) -> pd.DataFrame:
     return out.sort_values(["prioridade", "valor_prioridade"], ascending=[True, False])
 
 
+
+
+@st.cache_data(ttl=45, show_spinner=False)
+def _prepare_fila_cached(ref_iso: str, db_sig: float) -> pd.DataFrame:
+    ref = parse_iso_date(ref_iso) or date.today()
+    return _prepare_fila_uncached(ref)
+
+
+def prepare_fila(ref: date) -> pd.DataFrame:
+    ref_iso = ref.isoformat() if isinstance(ref, date) else str(ref)
+    return _prepare_fila_cached(ref_iso, _db_signature())
+
+
+@st.cache_data(ttl=45, show_spinner=False)
+def _prepare_fila_clientes_cached(ref_iso: str, db_sig: float) -> pd.DataFrame:
+    ref = parse_iso_date(ref_iso) or date.today()
+    return _prepare_fila_clientes_uncached(ref)
+
+
+def prepare_fila_clientes(ref: date) -> pd.DataFrame:
+    ref_iso = ref.isoformat() if isinstance(ref, date) else str(ref)
+    return _prepare_fila_clientes_cached(ref_iso, _db_signature())
 
 
 def apply_fila_filters(fila: pd.DataFrame, prefix: str = "fila") -> pd.DataFrame:
@@ -6151,15 +6363,17 @@ elif page == "Cliente":
             saldo_total_resumo = float(pd.to_numeric(options.get("saldo_total", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
             maior_atraso_resumo = int(pd.to_numeric(options.get("maior_dias_atraso", pd.Series(dtype=float)), errors="coerce").max() or 0)
 
-            resumo_c1, resumo_c2, resumo_c3, resumo_c4 = st.columns([1, 1, 1.2, 1.1])
-            with resumo_c1:
-                metric_card("Clientes", int_br(total_clientes_resumo), "No filtro")
-            with resumo_c2:
-                metric_card("Títulos", int_br(total_titulos_resumo), "Em aberto")
-            with resumo_c3:
-                metric_card("Saldo", br_money_short(saldo_total_resumo), br_money(saldo_total_resumo), long_text=True)
-            with resumo_c4:
-                metric_card("Maior atraso", f"{int_br(maior_atraso_resumo)} dias", "No filtro", long_text=True)
+            st.markdown(
+                f"""
+                <div class="summary-strip">
+                    <div class="summary-item"><span>Clientes</span><strong>{html.escape(int_br(total_clientes_resumo))}</strong><small>No filtro</small></div>
+                    <div class="summary-item"><span>Títulos</span><strong>{html.escape(int_br(total_titulos_resumo))}</strong><small>Em aberto</small></div>
+                    <div class="summary-item" title="{html.escape(br_money(saldo_total_resumo))}"><span>Saldo</span><strong>{html.escape(br_money_short(saldo_total_resumo))}</strong><small>{html.escape(br_money(saldo_total_resumo))}</small></div>
+                    <div class="summary-item"><span>Maior atraso</span><strong>{html.escape(int_br(maior_atraso_resumo))} dias</strong><small>No filtro</small></div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
             with st.expander("Ver clientes encontrados no filtro", expanded=False):
                 resumo_cols = [c for c in ["nome_cliente", "razao_social", "cnpj", "qtd_titulos", "saldo_total", "maior_dias_atraso", "variacoes_cadastro", "vendedor", "gerente", "notas_cliente"] if c in options.columns]
